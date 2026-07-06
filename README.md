@@ -1,8 +1,23 @@
 # NextNews API
 
-Local FastAPI pipeline for AI-generated NextNews posts.
+Local FastAPI backend for the NextNews app.
 
-The app ingests Hacker News best stories, stores source items in SQLite, extracts readable article text, filters low-quality sources with Azure OpenAI, generates social-feed-style post content, generates a PNG image, and exposes ready posts through a small read API.
+NextNews turns Hacker News source items into a lightweight social news feed. The API ingests candidate stories, stores source data in SQLite, extracts readable article text, filters low-quality sources with Azure OpenAI, generates feed-ready post copy and images, and serves the finished posts to the SwiftUI frontend.
+
+## Product Context
+
+This repository is the backend half of NextNews. The companion frontend lives in the sibling `../NextNews` Xcode project.
+
+The SwiftUI app currently expects the API at `http://127.0.0.1:8000` and uses it to:
+
+- Load a two-column home feed of generated posts.
+- Display generated titles, summaries, body text, agent names, source links, and images.
+- Optimistically like and unlike posts with app-local interaction state.
+- Search over the posts already loaded into the app.
+- Open a post detail view with source/share actions.
+- Create and continue AI reply threads on each post.
+
+In other words, this service is both the background content generator and the read API for the local frontend experience.
 
 ## Requirements
 
@@ -66,6 +81,8 @@ Start the API with the background ingestion and generation pipeline:
 uvicorn app.main:app --reload
 ```
 
+With the server running on the default port, the SwiftUI frontend in `../NextNews` can fetch posts from `http://127.0.0.1:8000/posts`.
+
 Start the API without the background pipeline:
 
 ```sh
@@ -95,7 +112,7 @@ Query parameters:
 - `limit`: 1 to 100, default `20`
 - `offset`: 0 or greater, default `0`
 
-Each post includes generated content, source metadata, an optional `/images/...` URL, agent name, and app-local like state.
+Each post includes generated content, source metadata, an optional `/images/...` URL, agent name, and app-local like state. This is the main feed endpoint used by the frontend.
 
 ### `GET /posts/{post_id}`
 
@@ -103,7 +120,7 @@ Returns one ready post. Missing, failed, filtered, or still-processing posts ret
 
 ### `POST /posts/{post_id}/like`
 
-Marks a ready post as liked. The operation is idempotent and returns:
+Marks a ready post as liked. The frontend applies this optimistically, then reconciles from the API response. The operation is idempotent and returns:
 
 ```json
 {
@@ -125,7 +142,7 @@ Creates a new conversation thread for a ready post. The request body is:
 {"message": "What does this mean for developers?"}
 ```
 
-The API stores the user message and the assistant reply after the Azure Responses API call succeeds. Replies use `AZURE_OPENAI_LLM_DEPLOYMENT` with the native `web_search` tool.
+The API stores the user message and the assistant reply after the Azure Responses API call succeeds. Replies use `AZURE_OPENAI_LLM_DEPLOYMENT` with the native `web_search` tool. The frontend presents these threads as per-post replies.
 
 ### `GET /posts/{post_id}/threads`
 
@@ -148,6 +165,19 @@ Only messages from that thread are used as conversation history.
 ### `GET /images/{image_name}`
 
 Serves generated images from `IMAGE_OUTPUT_DIR`.
+
+## Frontend Integration
+
+The current frontend client is defined in `../NextNews/NextNews/NewsAPI.swift`. It depends on these response fields and routes:
+
+- `GET /posts?limit=20&offset=0` for the home feed.
+- `POST /posts/{post_id}/like` and `DELETE /posts/{post_id}/like` for local like state.
+- `GET /posts/{post_id}/threads` to list reply threads for a post.
+- `POST /posts/{post_id}/threads` to start a reply thread.
+- `GET /threads/{thread_id}` and `POST /threads/{thread_id}/messages` to read and continue a thread.
+- Relative `image_url` values such as `/images/post-1.png`, resolved against `http://127.0.0.1:8000`.
+
+If the frontend base URL changes, update `NewsAPIClient.baseURL` in the frontend project.
 
 ## Data And Runtime Files
 
