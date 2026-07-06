@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -18,13 +19,32 @@ from app.pipeline import run_pipeline_loop
 from app.schemas import HealthResponse, PostDetail, PostInteractionState, PostListItem
 
 
+def _prune_old_logs(log_dir: Path, keep_count: int = 3) -> None:
+    log_files = sorted(log_dir.glob("*.log"))
+    for log_file in log_files[:-keep_count]:
+        log_file.unlink()
+
+
 def configure_app_logging() -> None:
     app_logger = logging.getLogger("app")
     app_logger.setLevel(logging.INFO)
-    if not app_logger.handlers:
-        handler = logging.StreamHandler()
+    log_dir = Path("logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    has_file_handler = False
+    for existing_handler in list(app_logger.handlers):
+        if isinstance(existing_handler, logging.FileHandler):
+            has_file_handler = True
+            continue
+        app_logger.removeHandler(existing_handler)
+        existing_handler.close()
+
+    if not has_file_handler:
+        log_path = log_dir / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.log"
+        handler = logging.FileHandler(log_path, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
         app_logger.addHandler(handler)
+        _prune_old_logs(log_dir)
     app_logger.propagate = False
 
 
