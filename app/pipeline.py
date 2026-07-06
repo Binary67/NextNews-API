@@ -8,7 +8,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.ai import AzureResponsesClient
+from app.ai import AzureResponsesClient, GeneratedPostContent
 from app.config import Settings
 from app.hn import HN_SOURCE, fetch_best_story_ids, fetch_item, is_valid_story
 from app.models import GeneratedPost, SourceItem, utc_now
@@ -39,25 +39,40 @@ def insert_source_item(session: Session, item: dict[str, Any]) -> SourceItem | N
     return source_item
 
 
-def claim_generated_post(
+def create_ready_generated_post(
     session: Session,
     source_item: SourceItem,
     settings: Settings,
+    content: GeneratedPostContent,
+    image_bytes: bytes,
+    output_dir: Path,
 ) -> GeneratedPost | None:
     post = GeneratedPost(
         source_item_id=source_item.id,
-        status="processing",
+        title=content.title,
+        description=content.description,
+        content=content.content,
+        image_prompt=content.image_prompt,
+        status="ready",
         llm_deployment=settings.azure_openai_llm_deployment,
         image_deployment=settings.azure_openai_image_deployment,
         image_quality=settings.image_quality,
+        ready_at=utc_now(),
     )
     session.add(post)
 
     try:
+        session.flush()
+        image_path = output_dir / f"post-{post.id}.png"
+        image_path.write_bytes(image_bytes)
+        post.image_path = str(image_path)
         session.commit()
     except IntegrityError:
         session.rollback()
         return None
+    except Exception:
+        session.rollback()
+        raise
 
     session.refresh(post)
     return post
@@ -72,32 +87,6 @@ def source_items_without_generated_post(session: Session, limit: int) -> list[So
         .limit(limit)
     )
     return list(session.scalars(statement))
-
-
-def mark_post_ready(
-    session: Session,
-    post: GeneratedPost,
-    content_title: str,
-    description: str,
-    content: str,
-    image_prompt: str,
-    image_path: str,
-) -> None:
-    post.title = content_title
-    post.description = description
-    post.content = content
-    post.image_prompt = image_prompt
-    post.image_path = image_path
-    post.status = "ready"
-    post.error_message = None
-    post.ready_at = utc_now()
-    session.commit()
-
-
-def mark_post_failed(session: Session, post: GeneratedPost, error: Exception) -> None:
-    post.status = "failed"
-    post.error_message = str(error)
-    session.commit()
 
 
 async def ingest_hacker_news(session: Session, settings: Settings) -> int:
@@ -144,36 +133,33 @@ async def generate_missing_posts(session: Session, settings: Settings) -> int:
     )
 
     for source_item in source_items:
-        post = claim_generated_post(session, source_item, settings)
-        if post is None:
-            logger.info("Source item %s is already claimed; skipping", source_item.id)
-            continue
-
         try:
             logger.info(
-                "Generating post content for post %s from source item %s",
-                post.id,
+                "Generating post content from source item %s",
                 source_item.id,
             )
             content = await ai_client.generate_post_content(source_item)
-            logger.info("Generating image for post %s", post.id)
+            logger.info("Generating image for source item %s", source_item.id)
             image_bytes = await ai_client.generate_image(content.image_prompt)
-            image_path = output_dir / f"post-{post.id}.png"
-            image_path.write_bytes(image_bytes)
-            mark_post_ready(
+            post = create_ready_generated_post(
                 session,
-                post,
-                content.title,
-                content.description,
-                content.content,
-                content.image_prompt,
-                str(image_path),
+                source_item,
+                settings,
+                content,
+                image_bytes,
+                output_dir,
             )
+            if post is None:
+                logger.info(
+                    "Source item %s already has a generated post; skipping",
+                    source_item.id,
+                )
+                continue
             generated_count += 1
             logger.info("Generated post %s successfully", post.id)
-        except Exception as error:
+        except Exception:
             logger.exception("Failed to generate post for source item %s", source_item.id)
-            mark_post_failed(session, post, error)
+            session.rollback()
 
     return generated_count
 
