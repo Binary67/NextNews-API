@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from app.ai import POST_SCHEMA, QUALITY_FILTER_SCHEMA, AzureResponsesClient
+from app.ai import (
+    POST_SCHEMA,
+    QUALITY_FILTER_SCHEMA,
+    AzureResponsesClient,
+    _normalize_thread_reply_text,
+)
 from app.config import Settings
 from app.models import ConversationMessage, GeneratedPost, SourceItem
 
@@ -228,6 +233,10 @@ def test_generate_thread_reply_uses_web_search_and_extracts_citations(
     assert request["tools"] == [{"type": "web_search"}]
     assert request["tool_choice"] == "auto"
     assert request["include"] == ["web_search_call.action.sources"]
+    assert "concise plain-text comment" in request["instructions"]
+    assert "usually 1-3 sentences" in request["instructions"]
+    assert "Do not use Markdown formatting" in request["instructions"]
+    assert "Markdown links" in request["instructions"]
     assert request_input["post"]["title"] == "Generated title"
     assert request_input["post"]["source_url"] == "https://example.com/article"
     assert request_input["post"]["article_text"] == source_item.article_text
@@ -240,6 +249,30 @@ def test_generate_thread_reply_uses_web_search_and_extracts_citations(
     assert result.response_id == "resp-123"
     assert result.citations[0].url == "https://example.com/source"
     assert result.citations[0].title == "Source title"
+
+
+def test_normalize_thread_reply_text_removes_markdown_emphasis() -> None:
+    assert _normalize_thread_reply_text(
+        " **Important** and _clear_ with `inline code`. "
+    ) == "Important and clear with inline code."
+
+
+def test_normalize_thread_reply_text_removes_list_markers() -> None:
+    assert _normalize_thread_reply_text(
+        "# Summary\n> Context\n- First point\n1. Second point"
+    ) == "Summary Context First point Second point"
+
+
+def test_normalize_thread_reply_text_preserves_markdown_link_urls() -> None:
+    assert _normalize_thread_reply_text(
+        "Read [the article](https://example.com/story) for **details**."
+    ) == "Read the article (https://example.com/story) for details."
+
+
+def test_normalize_thread_reply_text_unwraps_code_fences_and_cleans_whitespace() -> None:
+    assert _normalize_thread_reply_text(
+        "```python\nprint('hi')\n```\n\nUse it."
+    ) == "print('hi') Use it."
 
 
 def test_evaluate_source_item_quality_uses_filter_deployment(monkeypatch) -> None:

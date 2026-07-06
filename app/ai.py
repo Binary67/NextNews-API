@@ -1,6 +1,7 @@
 import base64
 import json
 import random
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -106,6 +107,38 @@ def _extract_url_citations(response: object) -> list[ThreadReplyCitation]:
                 seen_urls.add(url)
 
     return citations
+
+
+def _markdown_link_to_plain_text(match: re.Match[str]) -> str:
+    label = match.group(1).strip()
+    url = match.group(2).strip()
+    if label and url:
+        return f"{label} ({url})"
+
+    return label or url
+
+
+def _normalize_thread_reply_text(text: str) -> str:
+    text = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)", _markdown_link_to_plain_text, text)
+
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            continue
+
+        line = re.sub(r"^\s{0,3}>\s?", "", line)
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
+        line = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", line)
+        lines.append(line)
+
+    text = " ".join(lines)
+    text = re.sub(r"(?<!\w)\*\*(\S(?:.*?\S)?)\*\*(?!\w)", r"\1", text)
+    text = re.sub(r"(?<!\w)__(\S(?:.*?\S)?)__(?!\w)", r"\1", text)
+    text = re.sub(r"(?<!\w)\*(\S(?:.*?\S)?)\*(?!\w)", r"\1", text)
+    text = re.sub(r"(?<!\w)_(\S(?:.*?\S)?)_(?!\w)", r"\1", text)
+    text = re.sub(r"`+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 POST_SCHEMA = {
@@ -283,7 +316,10 @@ class AzureResponsesClient:
                 "history. Use web search when current or external context would improve "
                 "the answer. Do not use other post comments or other threads as context. "
                 "Do not invent unsupported facts, numbers, quotes, or conclusions. Keep "
-                "the answer clear, useful, and conversational."
+                "the answer clear, useful, and conversational. Reply as a concise "
+                "plain-text comment, usually 1-3 sentences unless the user explicitly "
+                "asks for more detail. Do not use Markdown formatting, headings, tables, "
+                "bullet lists, bold or italic text, code fences, or Markdown links."
             ),
             tools=[{"type": "web_search"}],
             tool_choice="auto",
@@ -311,7 +347,7 @@ class AzureResponsesClient:
 
         response_id = _response_value(response, "id")
         return ThreadReply(
-            content=response.output_text.strip(),
+            content=_normalize_thread_reply_text(response.output_text),
             citations=_extract_url_citations(response),
             response_id=response_id if isinstance(response_id, str) else None,
         )
