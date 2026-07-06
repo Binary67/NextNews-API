@@ -8,6 +8,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.article import extract_article_text, fetch_article_text
 from app.ai import AzureResponsesClient, GeneratedPostContent
 from app.config import Settings
 from app.hn import HN_SOURCE, fetch_best_story_ids, fetch_item, is_valid_story
@@ -25,6 +26,7 @@ def insert_source_item(session: Session, item: dict[str, Any]) -> SourceItem | N
         url=item.get("url"),
         author=item.get("by"),
         score=item.get("score"),
+        article_text=extract_article_text(item["text"]) if item.get("text") else None,
         raw_json=item,
     )
     session.add(source_item)
@@ -89,6 +91,18 @@ def source_items_without_generated_post(session: Session, limit: int) -> list[So
     return list(session.scalars(statement))
 
 
+async def ensure_article_text(
+    session: Session,
+    client: httpx.AsyncClient,
+    source_item: SourceItem,
+) -> None:
+    if source_item.article_text or not source_item.url:
+        return
+
+    source_item.article_text = await fetch_article_text(client, source_item.url)
+    session.commit()
+
+
 async def ingest_hacker_news(session: Session, settings: Settings) -> int:
     inserted_count = 0
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -132,34 +146,36 @@ async def generate_missing_posts(session: Session, settings: Settings) -> int:
         settings.post_generation_limit,
     )
 
-    for source_item in source_items:
-        try:
-            logger.info(
-                "Generating post content from source item %s",
-                source_item.id,
-            )
-            content = await ai_client.generate_post_content(source_item)
-            logger.info("Generating image for source item %s", source_item.id)
-            image_bytes = await ai_client.generate_image(content.image_prompt)
-            post = create_ready_generated_post(
-                session,
-                source_item,
-                settings,
-                content,
-                image_bytes,
-                output_dir,
-            )
-            if post is None:
+    async with httpx.AsyncClient(timeout=30.0) as article_client:
+        for source_item in source_items:
+            try:
+                await ensure_article_text(session, article_client, source_item)
                 logger.info(
-                    "Source item %s already has a generated post; skipping",
+                    "Generating post content from source item %s",
                     source_item.id,
                 )
-                continue
-            generated_count += 1
-            logger.info("Generated post %s successfully", post.id)
-        except Exception:
-            logger.exception("Failed to generate post for source item %s", source_item.id)
-            session.rollback()
+                content = await ai_client.generate_post_content(source_item)
+                logger.info("Generating image for source item %s", source_item.id)
+                image_bytes = await ai_client.generate_image(content.image_prompt)
+                post = create_ready_generated_post(
+                    session,
+                    source_item,
+                    settings,
+                    content,
+                    image_bytes,
+                    output_dir,
+                )
+                if post is None:
+                    logger.info(
+                        "Source item %s already has a generated post; skipping",
+                        source_item.id,
+                    )
+                    continue
+                generated_count += 1
+                logger.info("Generated post %s successfully", post.id)
+            except Exception:
+                logger.exception("Failed to generate post for source item %s", source_item.id)
+                session.rollback()
 
     return generated_count
 

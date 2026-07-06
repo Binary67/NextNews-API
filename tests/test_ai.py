@@ -1,10 +1,12 @@
 import asyncio
 import base64
+import json
 
 import pytest
 
-from app.ai import AzureResponsesClient
+from app.ai import POST_SCHEMA, AzureResponsesClient
 from app.config import Settings
+from app.models import SourceItem
 
 
 class FakeImageResponse:
@@ -43,6 +45,32 @@ class FakeAsyncClient:
         return self.response
 
 
+class FakeResponses:
+    requests: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.requests.append(kwargs)
+
+        class Response:
+            output_text = json.dumps(
+                {
+                    "title": "Useful release for developers",
+                    "description": "A new release improves developer workflows.",
+                    "content": "The update focuses on practical improvements for teams.",
+                    "image_prompt": "Realistic editorial photograph of software engineers",
+                }
+            )
+
+        return Response()
+
+
+class FakeOpenAI:
+    def __init__(self, *, base_url: str | None, api_key: str) -> None:
+        self.base_url = base_url
+        self.api_key = api_key
+        self.responses = FakeResponses()
+
+
 def configured_settings() -> Settings:
     return Settings(
         database_url="sqlite://",
@@ -56,6 +84,38 @@ def configured_settings() -> Settings:
         image_quality="medium",
         image_size="1024x1024",
     )
+
+
+def test_generate_post_content_uses_article_text_without_source_framing(
+    monkeypatch,
+) -> None:
+    FakeResponses.requests = []
+    monkeypatch.setattr("app.ai.AsyncOpenAI", FakeOpenAI)
+
+    source_item = SourceItem(
+        source="hacker_news",
+        source_item_id="123",
+        title="Original submission title",
+        url="https://example.com/article",
+        author="author",
+        score=42,
+        article_text="The article explains why the release matters to developers.",
+        raw_json={"id": 123},
+    )
+
+    client = AzureResponsesClient(configured_settings())
+    result = asyncio.run(client.generate_post_content(source_item))
+
+    assert result.title == "Useful release for developers"
+    request = FakeResponses.requests[0]
+    request_input = json.loads(request["input"])
+    schema_text = json.dumps(POST_SCHEMA)
+
+    assert request_input["article_text"] == source_item.article_text
+    assert "Use article_text as the primary source" in request["instructions"]
+    assert "Do not mention Hacker News" in request["instructions"]
+    assert "under " not in schema_text
+    assert "concise" not in schema_text
 
 
 def test_generate_image_calls_azure_image_rest_endpoint(monkeypatch) -> None:
@@ -116,4 +176,3 @@ def test_generate_image_raises_for_missing_b64_json(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match=r"data\[0\]\.b64_json"):
         asyncio.run(client.generate_image("prompt"))
-

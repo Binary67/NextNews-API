@@ -95,16 +95,23 @@ def test_generate_missing_posts_respects_generation_limit(tmp_path, monkeypatch)
     session_factory = create_session_factory(engine)
 
     class FakeAzureResponsesClient:
+        article_texts: list[str | None] = []
+
         def __init__(self, settings: Settings) -> None:
             pass
 
         async def generate_post_content(self, source_item: SourceItem) -> GeneratedPostContent:
+            self.article_texts.append(source_item.article_text)
             return generated_content()
 
         async def generate_image(self, prompt: str) -> bytes:
             return b"image-bytes"
 
+    async def fake_fetch_article_text(client, url: str) -> str:
+        return f"Fetched article text from {url}"
+
     monkeypatch.setattr("app.pipeline.AzureResponsesClient", FakeAzureResponsesClient)
+    monkeypatch.setattr("app.pipeline.fetch_article_text", fake_fetch_article_text)
 
     with session_factory() as session:
         assert insert_source_item(session, hn_item(1)) is not None
@@ -116,6 +123,9 @@ def test_generate_missing_posts_respects_generation_limit(tmp_path, monkeypatch)
         posts = session.scalars(select(GeneratedPost)).all()
         assert len(posts) == 1
         assert posts[0].status == "ready"
+        assert FakeAzureResponsesClient.article_texts == [
+            "Fetched article text from https://example.com/sqlite"
+        ]
 
 
 def test_generate_missing_posts_retries_after_failed_generation(tmp_path, monkeypatch) -> None:
@@ -153,6 +163,11 @@ def test_generate_missing_posts_retries_after_failed_generation(tmp_path, monkey
 
         async def generate_image(self, prompt: str) -> bytes:
             return b"image-bytes"
+
+    async def fake_fetch_article_text(client, url: str) -> str:
+        return f"Fetched article text from {url}"
+
+    monkeypatch.setattr("app.pipeline.fetch_article_text", fake_fetch_article_text)
 
     with session_factory() as session:
         assert insert_source_item(session, hn_item(1)) is not None

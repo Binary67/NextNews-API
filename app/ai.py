@@ -24,15 +24,15 @@ POST_SCHEMA = {
     "properties": {
         "title": {
             "type": "string",
-            "description": "Short social feed title, under 90 characters.",
+            "description": "Attractive neutral social feed title.",
         },
         "description": {
             "type": "string",
-            "description": "One sentence summary, under 180 characters.",
+            "description": "Natural social-media-style description.",
         },
         "content": {
             "type": "string",
-            "description": "A concise social media style post based only on the source.",
+            "description": "Informative social-media-style post based on the source material.",
         },
         "image_prompt": {
             "type": "string",
@@ -58,10 +58,14 @@ class AzureResponsesClient:
         response = await self._client.responses.create(
             model=self._settings.azure_openai_llm_deployment,
             instructions=(
-                "You turn Hacker News source items into factual, social-media-style posts "
-                "for a technology news feed. Use only the provided source fields. Do not "
-                "invent unsupported facts, numbers, quotes, or conclusions. Keep the tone "
-                "clear and informed. Return structured JSON only."
+                "You turn source material into factual, social-media-style posts for a "
+                "technology news feed. Use article_text as the primary source and metadata "
+                "only for orientation. Do not mention Hacker News, the source platform, "
+                "source site, source origin, author, score, or submission metadata in the "
+                "title, description, or content unless it is central to the article itself. "
+                "Write an attractive title, a natural description, and informative content. "
+                "Do not invent unsupported facts, numbers, quotes, or conclusions. Keep the "
+                "tone clear and informed. Return structured JSON only."
             ),
             input=json.dumps(
                 {
@@ -71,6 +75,7 @@ class AzureResponsesClient:
                     "url": source_item.url,
                     "author": source_item.author,
                     "score": source_item.score,
+                    "article_text": source_item.article_text,
                     "raw": source_item.raw_json,
                     "image_style": (
                         "Realistic editorial photograph, natural lighting, no illustration, "

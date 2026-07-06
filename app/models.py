@@ -23,6 +23,7 @@ class SourceItem(Base):
     url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    article_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_json: Mapped[dict] = mapped_column(JSON)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -40,8 +41,8 @@ class GeneratedPost(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_item_id: Mapped[int] = mapped_column(ForeignKey("source_items.id"), index=True)
-    title: Mapped[str | None] = mapped_column(String(280), nullable=True)
-    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
@@ -59,4 +60,3 @@ class GeneratedPost(Base):
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     source_item: Mapped[SourceItem] = relationship(back_populates="generated_post")
-
