@@ -82,6 +82,33 @@ def create_ready_generated_post(
     return post
 
 
+def create_failed_generated_post(
+    session: Session,
+    source_item: SourceItem,
+    error_message: str,
+) -> GeneratedPost | None:
+    post = GeneratedPost(
+        source_item_id=source_item.id,
+        status="failed",
+        error_message=error_message,
+    )
+    session.add(post)
+
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return None
+
+    session.refresh(post)
+    return post
+
+
+def article_fetch_error_message(error: Exception) -> str:
+    message = str(error).strip() or error.__class__.__name__
+    return f"Article fetch failed: {message}"[:1000]
+
+
 def source_items_without_generated_post(session: Session, limit: int) -> list[SourceItem]:
     statement: Select[tuple[SourceItem]] = (
         select(SourceItem)
@@ -151,7 +178,26 @@ async def generate_missing_posts(session: Session, settings: Settings) -> int:
     async with httpx.AsyncClient(timeout=30.0) as article_client:
         for source_item in source_items:
             try:
-                await ensure_article_text(session, article_client, source_item)
+                try:
+                    await ensure_article_text(session, article_client, source_item)
+                except Exception as error:
+                    logger.exception(
+                        "Failed to fetch article text for source item %s",
+                        source_item.id,
+                    )
+                    session.rollback()
+                    failed_post = create_failed_generated_post(
+                        session,
+                        source_item,
+                        article_fetch_error_message(error),
+                    )
+                    if failed_post is None:
+                        logger.info(
+                            "Source item %s already has a generated post; skipping",
+                            source_item.id,
+                        )
+                    continue
+
                 logger.info(
                     "Generating post content from source item %s",
                     source_item.id,
