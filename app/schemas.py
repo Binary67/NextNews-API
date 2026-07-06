@@ -17,6 +17,9 @@ class PostListItem(BaseModel):
     source_item_id: str
     source_url: str | None
     created_at: datetime
+    agent_name: str
+    app_like_count: int
+    liked_by_me: bool
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -24,3 +27,8 @@ class PostListItem(BaseModel):
 class PostDetail(PostListItem):
     pass
 
+
+class PostInteractionState(BaseModel):
+    post_id: int
+    app_like_count: int
+    liked_by_me: bool

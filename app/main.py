@@ -7,14 +7,15 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
 from app.database import create_app_engine, create_session_factory, init_database
-from app.models import GeneratedPost, SourceItem
+from app.models import GeneratedPost, PostLike, SourceItem
 from app.pipeline import run_pipeline_loop
-from app.schemas import HealthResponse, PostDetail, PostListItem
+from app.schemas import HealthResponse, PostDetail, PostInteractionState, PostListItem
 
 
 def configure_app_logging() -> None:
@@ -37,6 +38,7 @@ def _image_url(image_path: str | None, settings: Settings) -> str | None:
 
 def _post_to_schema(post: GeneratedPost, settings: Settings) -> PostListItem:
     source_item = post.source_item
+    liked_by_me = post.like is not None
     return PostListItem(
         id=post.id,
         title=post.title or "",
@@ -47,7 +49,26 @@ def _post_to_schema(post: GeneratedPost, settings: Settings) -> PostListItem:
         source_item_id=source_item.source_item_id,
         source_url=source_item.url,
         created_at=post.ready_at or post.created_at,
+        agent_name=post.agent_name,
+        app_like_count=1 if liked_by_me else 0,
+        liked_by_me=liked_by_me,
     )
+
+
+def _post_interaction_state(post_id: int, liked_by_me: bool) -> PostInteractionState:
+    return PostInteractionState(
+        post_id=post_id,
+        app_like_count=1 if liked_by_me else 0,
+        liked_by_me=liked_by_me,
+    )
+
+
+def _ready_post_or_404(session: Session, post_id: int) -> GeneratedPost:
+    post = session.get(GeneratedPost, post_id)
+    if post is None or post.status != "ready":
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    return post
 
 
 def create_app(
@@ -115,11 +136,37 @@ def create_app(
         post_id: int,
         session: Session = Depends(get_session),
     ) -> PostDetail:
-        post = session.get(GeneratedPost, post_id)
-        if post is None or post.status != "ready":
-            raise HTTPException(status_code=404, detail="Post not found")
+        post = _ready_post_or_404(session, post_id)
 
         return PostDetail(**_post_to_schema(post, app_settings).model_dump())
+
+    @app.post("/posts/{post_id}/like", response_model=PostInteractionState)
+    def like_post(
+        post_id: int,
+        session: Session = Depends(get_session),
+    ) -> PostInteractionState:
+        post = _ready_post_or_404(session, post_id)
+        if post.like is None:
+            session.add(PostLike(post_id=post.id))
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+
+        return _post_interaction_state(post.id, liked_by_me=True)
+
+    @app.delete("/posts/{post_id}/like", response_model=PostInteractionState)
+    def unlike_post(
+        post_id: int,
+        session: Session = Depends(get_session),
+    ) -> PostInteractionState:
+        post = _ready_post_or_404(session, post_id)
+        like = session.scalar(select(PostLike).where(PostLike.post_id == post.id))
+        if like is not None:
+            session.delete(like)
+            session.commit()
+
+        return _post_interaction_state(post.id, liked_by_me=False)
 
     return app
 

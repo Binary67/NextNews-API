@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.agents import DEFAULT_AGENT_NAME
 from app.database import Base
 
 
@@ -46,6 +47,7 @@ class GeneratedPost(Base):
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    agent_name: Mapped[str] = mapped_column(String(100), default=DEFAULT_AGENT_NAME)
     status: Mapped[str] = mapped_column(String(32), default="processing", index=True)
     llm_deployment: Mapped[str | None] = mapped_column(String(255), nullable=True)
     image_deployment: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -60,3 +62,18 @@ class GeneratedPost(Base):
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     source_item: Mapped[SourceItem] = relationship(back_populates="generated_post")
+    like: Mapped["PostLike | None"] = relationship(back_populates="post", uselist=False)
+
+
+class PostLike(Base):
+    __tablename__ = "post_likes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    post_id: Mapped[int] = mapped_column(
+        ForeignKey("generated_posts.id"),
+        unique=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    post: Mapped[GeneratedPost] = relationship(back_populates="like")

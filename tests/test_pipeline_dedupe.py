@@ -2,6 +2,7 @@ import asyncio
 
 from sqlalchemy import select
 
+from app.agents import AGENT_NAMES
 from app.ai import GeneratedPostContent
 from app.config import Settings
 from app.database import create_app_engine, create_session_factory, init_database
@@ -75,6 +76,7 @@ def test_create_ready_generated_post_dedupes_by_source_item(tmp_path) -> None:
     posts = session.scalars(select(GeneratedPost)).all()
     assert len(posts) == 1
     assert posts[0].status == "ready"
+    assert posts[0].agent_name in AGENT_NAMES
 
 
 def test_generate_missing_posts_respects_generation_limit(tmp_path, monkeypatch) -> None:

@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.article import extract_article_text, fetch_article_text
+from app.agents import random_agent_name
 from app.ai import AzureResponsesClient, GeneratedPostContent
 from app.config import Settings
 from app.hn import HN_SOURCE, fetch_best_story_ids, fetch_item, is_valid_story
@@ -55,6 +56,7 @@ def create_ready_generated_post(
         description=content.description,
         content=content.content,
         image_prompt=content.image_prompt,
+        agent_name=random_agent_name(),
         status="ready",
         llm_deployment=settings.azure_openai_llm_deployment,
         image_deployment=settings.azure_openai_image_deployment,
