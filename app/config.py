@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from dotenv import load_dotenv
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -66,4 +67,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    load_dotenv(override=True)
     return Settings()
