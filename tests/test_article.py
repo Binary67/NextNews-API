@@ -1,6 +1,6 @@
 import asyncio
 
-from app.article import extract_article_text, fetch_article_text
+from app.article import extract_html_snippet_text, fetch_article_text
 
 
 class FakeArticleResponse:
@@ -22,8 +22,8 @@ class FakeArticleClient:
         return self.response
 
 
-def test_extract_article_text_removes_non_visible_html() -> None:
-    text = extract_article_text(
+def test_extract_html_snippet_text_removes_non_visible_html() -> None:
+    text = extract_html_snippet_text(
         """
         <html>
           <head><style>.hidden { display: none; }</style></head>
@@ -47,14 +47,64 @@ def test_extract_article_text_removes_non_visible_html() -> None:
     assert "It reduces waiting time for developers." in text
 
 
-def test_fetch_article_text_reads_html() -> None:
+def test_fetch_article_text_reads_html_with_trafilatura(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def fake_extract(document: str, **kwargs) -> str:
+        calls.append((document, kwargs))
+        return "Readable\n\narticle body."
+
+    monkeypatch.setattr("app.article.trafilatura.extract", fake_extract)
     client = FakeArticleClient(
-        FakeArticleResponse("<article><p>Readable article body.</p></article>")
+        FakeArticleResponse("<article><p>Ignored parser body.</p></article>")
     )
 
     text = asyncio.run(fetch_article_text(client, "https://example.com/article"))
 
-    assert text == "Readable article body."
+    assert text == "Readable\narticle body."
     assert client.requests == [
         {"url": "https://example.com/article", "follow_redirects": True}
     ]
+    assert calls == [
+        (
+            "<article><p>Ignored parser body.</p></article>",
+            {
+                "output_format": "txt",
+                "include_comments": False,
+                "include_tables": True,
+                "favor_precision": True,
+            },
+        )
+    ]
+
+
+def test_fetch_article_text_returns_none_when_trafilatura_cannot_extract(
+    monkeypatch,
+) -> None:
+    def fake_extract(document: str, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr("app.article.trafilatura.extract", fake_extract)
+    client = FakeArticleClient(
+        FakeArticleResponse(
+            "<html><body><nav>Navigation</nav><p>Broad parser would read this.</p></body></html>"
+        )
+    )
+
+    text = asyncio.run(fetch_article_text(client, "https://example.com/article"))
+
+    assert text is None
+
+
+def test_fetch_article_text_reads_plain_text_without_trafilatura(monkeypatch) -> None:
+    def unexpected_extract(document: str, **kwargs) -> None:
+        raise AssertionError("trafilatura should not run for text/plain responses")
+
+    monkeypatch.setattr("app.article.trafilatura.extract", unexpected_extract)
+    client = FakeArticleClient(
+        FakeArticleResponse(" Plain text\n\narticle body. ", content_type="text/plain")
+    )
+
+    text = asyncio.run(fetch_article_text(client, "https://example.com/article.txt"))
+
+    assert text == "Plain text\narticle body."

@@ -9,7 +9,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.article import extract_article_text, fetch_article_text
+from app.article import extract_html_snippet_text, fetch_article_text
 from app.agents import random_agent_name
 from app.ai import AzureResponsesClient, GeneratedPostContent
 from app.config import Settings
@@ -28,7 +28,7 @@ def insert_source_item(session: Session, item: dict[str, Any]) -> SourceItem | N
         url=item.get("url"),
         author=item.get("by"),
         score=item.get("score"),
-        article_text=extract_article_text(item["text"]) if item.get("text") else None,
+        article_text=extract_html_snippet_text(item["text"]) if item.get("text") else None,
         raw_json=item,
     )
     session.add(source_item)
