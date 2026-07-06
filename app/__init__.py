@@ -1,0 +1,2 @@
+"""NextNews API package."""
+
