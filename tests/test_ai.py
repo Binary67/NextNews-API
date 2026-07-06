@@ -91,6 +91,11 @@ def test_generate_post_content_uses_article_text_without_source_framing(
 ) -> None:
     FakeResponses.requests = []
     monkeypatch.setattr("app.ai.AsyncOpenAI", FakeOpenAI)
+    selected_image_style = (
+        "Flat vector editorial illustration with clean geometric shapes, restrained "
+        "colors, and no text overlay."
+    )
+    monkeypatch.setattr("app.ai.random_image_style", lambda: selected_image_style)
 
     source_item = SourceItem(
         source="hacker_news",
@@ -112,8 +117,10 @@ def test_generate_post_content_uses_article_text_without_source_framing(
     schema_text = json.dumps(POST_SCHEMA)
 
     assert request_input["article_text"] == source_item.article_text
+    assert request_input["image_style"] == selected_image_style
     assert "Use article_text as the primary source" in request["instructions"]
     assert "Do not mention Hacker News" in request["instructions"]
+    assert "realistic editorial image" not in schema_text
     assert "under " not in schema_text
     assert "concise" not in schema_text
 

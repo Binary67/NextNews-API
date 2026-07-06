@@ -1,5 +1,6 @@
 import base64
 import json
+import random
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -16,6 +17,38 @@ class GeneratedPostContent:
     description: str
     content: str
     image_prompt: str
+
+
+IMAGE_STYLES: tuple[str, ...] = (
+    "Realistic editorial photograph with natural lighting, believable people or "
+    "objects, and no text overlay.",
+    "Documentary-style photograph with candid composition, natural setting, and "
+    "no text overlay.",
+    "Studio product photograph with clean lighting, object-focused composition, "
+    "and no text overlay.",
+    "Macro detail photograph emphasizing close-up technical texture, materials, "
+    "or hardware details, with no text overlay.",
+    "Polished editorial illustration with a modern magazine feel, clear subject, "
+    "and no text overlay.",
+    "Flat vector editorial illustration with clean geometric shapes, restrained "
+    "colors, and no text overlay.",
+    "Minimalist spot illustration with a simple focused visual metaphor and no "
+    "text overlay.",
+    "Isometric illustration showing structured digital systems, infrastructure, "
+    "or workflows, with no text overlay.",
+    "Technical cutaway illustration showing components, layers, or architecture "
+    "without labels or text overlay.",
+    "Conceptual editorial metaphor that represents the story idea symbolically, "
+    "with no text overlay.",
+    "Abstract data visual using grids, flows, particles, or network patterns, "
+    "with no readable text.",
+    "Soft 3D editorial render with polished objects, balanced lighting, and no "
+    "text overlay.",
+)
+
+
+def random_image_style() -> str:
+    return random.choice(IMAGE_STYLES)
 
 
 POST_SCHEMA = {
@@ -36,7 +69,9 @@ POST_SCHEMA = {
         },
         "image_prompt": {
             "type": "string",
-            "description": "Prompt for a realistic editorial image with no text overlay.",
+            "description": (
+                "Prompt for a style-appropriate editorial image with no text overlay."
+            ),
         },
     },
     "required": ["title", "description", "content", "image_prompt"],
@@ -77,11 +112,7 @@ class AzureResponsesClient:
                     "score": source_item.score,
                     "article_text": source_item.article_text,
                     "raw": source_item.raw_json,
-                    "image_style": (
-                        "Realistic editorial photograph, natural lighting, no illustration, "
-                        "no cartoon style, no text overlay, no UI mockup unless the story is "
-                        "specifically about software UI."
-                    ),
+                    "image_style": random_image_style(),
                 }
             ),
             text={
