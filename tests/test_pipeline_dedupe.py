@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 
 from sqlalchemy import select
 
@@ -6,17 +7,19 @@ from app.agents import AGENT_NAMES
 from app.ai import GeneratedPostContent
 from app.config import Settings
 from app.database import create_app_engine, create_session_factory, init_database
-from app.models import GeneratedPost, SourceItem
+from app.models import GeneratedPost, SourceItem, utc_now
 from app.pipeline import (
     create_ready_generated_post,
     generate_missing_posts,
+    ingest_hacker_news,
     insert_source_item,
+    should_refresh_hacker_news,
     source_items_without_generated_post,
 )
 
 
 def make_session():
-    settings = Settings(database_url="sqlite://", hn_pipeline_interval_seconds=60)
+    settings = Settings(database_url="sqlite://", post_generation_interval_seconds=60)
     engine = create_app_engine(settings.database_url)
     init_database(engine, settings.database_url)
     session_factory = create_session_factory(engine)
@@ -43,6 +46,152 @@ def test_insert_source_item_dedupes_by_source_and_hn_id() -> None:
     assert first is not None
     assert second is None
     assert len(session.scalars(select(SourceItem)).all()) == 1
+
+
+def test_ingest_hacker_news_skips_existing_ids_before_fetching_items(monkeypatch) -> None:
+    settings = Settings(
+        database_url="sqlite://",
+        hn_story_scan_limit=3,
+        source_backlog_target=10,
+        hn_max_item_fetches_per_refresh=10,
+    )
+    engine = create_app_engine(settings.database_url)
+    init_database(engine, settings.database_url)
+    session_factory = create_session_factory(engine)
+    fetched_items: list[int] = []
+
+    async def fake_fetch_best_story_ids(client, limit: int) -> list[int]:
+        assert limit == 3
+        return [1, 2, 3]
+
+    async def fake_fetch_item(client, item_id: int) -> dict:
+        fetched_items.append(item_id)
+        return hn_item(item_id)
+
+    monkeypatch.setattr("app.pipeline.fetch_best_story_ids", fake_fetch_best_story_ids)
+    monkeypatch.setattr("app.pipeline.fetch_item", fake_fetch_item)
+
+    with session_factory() as session:
+        assert insert_source_item(session, hn_item(1)) is not None
+
+        inserted_count = asyncio.run(ingest_hacker_news(session, settings))
+
+        assert inserted_count == 2
+        assert fetched_items == [2, 3]
+        source_item_ids = [
+            source_item.source_item_id
+            for source_item in session.scalars(select(SourceItem)).all()
+        ]
+        assert sorted(source_item_ids) == ["1", "2", "3"]
+
+
+def test_ingest_hacker_news_skips_item_fetches_when_backlog_is_full(monkeypatch) -> None:
+    settings = Settings(
+        database_url="sqlite://",
+        hn_story_scan_limit=3,
+        source_backlog_target=1,
+        hn_max_item_fetches_per_refresh=10,
+    )
+    engine = create_app_engine(settings.database_url)
+    init_database(engine, settings.database_url)
+    session_factory = create_session_factory(engine)
+    id_fetch_limits: list[int] = []
+    fetched_items: list[int] = []
+
+    async def fake_fetch_best_story_ids(client, limit: int) -> list[int]:
+        id_fetch_limits.append(limit)
+        return [1, 2, 3]
+
+    async def fake_fetch_item(client, item_id: int) -> dict:
+        fetched_items.append(item_id)
+        return hn_item(item_id)
+
+    monkeypatch.setattr("app.pipeline.fetch_best_story_ids", fake_fetch_best_story_ids)
+    monkeypatch.setattr("app.pipeline.fetch_item", fake_fetch_item)
+
+    with session_factory() as session:
+        assert insert_source_item(session, hn_item(1)) is not None
+
+        inserted_count = asyncio.run(ingest_hacker_news(session, settings))
+
+        assert inserted_count == 0
+        assert id_fetch_limits == [3]
+        assert fetched_items == []
+
+
+def test_ingest_hacker_news_caps_item_fetches_per_refresh(monkeypatch) -> None:
+    settings = Settings(
+        database_url="sqlite://",
+        hn_story_scan_limit=5,
+        source_backlog_target=100,
+        hn_max_item_fetches_per_refresh=2,
+    )
+    engine = create_app_engine(settings.database_url)
+    init_database(engine, settings.database_url)
+    session_factory = create_session_factory(engine)
+    fetched_items: list[int] = []
+
+    async def fake_fetch_best_story_ids(client, limit: int) -> list[int]:
+        assert limit == 5
+        return [1, 2, 3, 4, 5]
+
+    async def fake_fetch_item(client, item_id: int) -> dict:
+        fetched_items.append(item_id)
+        return hn_item(item_id)
+
+    monkeypatch.setattr("app.pipeline.fetch_best_story_ids", fake_fetch_best_story_ids)
+    monkeypatch.setattr("app.pipeline.fetch_item", fake_fetch_item)
+
+    with session_factory() as session:
+        inserted_count = asyncio.run(ingest_hacker_news(session, settings))
+
+        assert inserted_count == 2
+        assert fetched_items == [1, 2]
+
+
+def test_should_refresh_hacker_news_uses_startup_interval_and_low_backlog() -> None:
+    settings = Settings(
+        database_url="sqlite://",
+        hn_refresh_interval_seconds=1800,
+        source_backlog_low_watermark=10,
+    )
+    now = utc_now()
+
+    assert should_refresh_hacker_news(
+        now,
+        None,
+        100,
+        settings,
+        was_hn_backlog_below_low_watermark=False,
+    )
+    assert not should_refresh_hacker_news(
+        now,
+        now - timedelta(seconds=60),
+        100,
+        settings,
+        was_hn_backlog_below_low_watermark=False,
+    )
+    assert should_refresh_hacker_news(
+        now,
+        now - timedelta(seconds=60),
+        9,
+        settings,
+        was_hn_backlog_below_low_watermark=False,
+    )
+    assert not should_refresh_hacker_news(
+        now,
+        now - timedelta(seconds=60),
+        9,
+        settings,
+        was_hn_backlog_below_low_watermark=True,
+    )
+    assert should_refresh_hacker_news(
+        now,
+        now - timedelta(seconds=1800),
+        100,
+        settings,
+        was_hn_backlog_below_low_watermark=False,
+    )
 
 
 def generated_content() -> GeneratedPostContent:
@@ -87,7 +236,7 @@ def test_create_ready_generated_post_dedupes_by_source_item(tmp_path) -> None:
 def test_generate_missing_posts_respects_generation_limit(tmp_path, monkeypatch) -> None:
     settings = Settings(
         database_url="sqlite://",
-        hn_pipeline_interval_seconds=60,
+        post_generation_interval_seconds=60,
         post_generation_limit=1,
         image_output_dir=str(tmp_path / "images"),
         azure_openai_llm_endpoint="https://example.openai.azure.com",
@@ -141,7 +290,7 @@ def test_generate_missing_posts_marks_article_fetch_failure_as_failed(
 ) -> None:
     settings = Settings(
         database_url="sqlite://",
-        hn_pipeline_interval_seconds=60,
+        post_generation_interval_seconds=60,
         post_generation_limit=1,
         image_output_dir=str(tmp_path / "images"),
         azure_openai_llm_endpoint="https://example.openai.azure.com",
@@ -190,7 +339,7 @@ def test_generate_missing_posts_marks_article_fetch_failure_as_failed(
 def test_generate_missing_posts_retries_after_failed_generation(tmp_path, monkeypatch) -> None:
     settings = Settings(
         database_url="sqlite://",
-        hn_pipeline_interval_seconds=60,
+        post_generation_interval_seconds=60,
         image_output_dir=str(tmp_path / "images"),
         azure_openai_llm_endpoint="https://example.openai.azure.com",
         azure_openai_llm_api_key="llm-key",

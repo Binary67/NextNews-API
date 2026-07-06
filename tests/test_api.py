@@ -11,7 +11,7 @@ def make_client(tmp_path):
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'nextnews-test.db'}",
         image_output_dir=str(tmp_path / "images"),
-        hn_pipeline_interval_seconds=60,
+        post_generation_interval_seconds=60,
     )
     app = create_app(settings=settings, start_pipeline=False)
     client = TestClient(app)

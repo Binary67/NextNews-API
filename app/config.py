@@ -18,9 +18,13 @@ class Settings(BaseSettings):
     azure_openai_image_deployment: str | None = None
     azure_openai_image_api_version: str = "2025-04-01-preview"
 
-    hn_fetch_limit: int = Field(default=20, ge=1, le=500)
     post_generation_limit: int = Field(default=1, ge=1, le=100)
-    hn_pipeline_interval_seconds: int = Field(default=1800, ge=60)
+    post_generation_interval_seconds: int = Field(default=60, ge=1)
+    hn_refresh_interval_seconds: int = Field(default=1800, ge=60)
+    hn_story_scan_limit: int = Field(default=500, ge=1, le=500)
+    source_backlog_target: int = Field(default=100, ge=1)
+    source_backlog_low_watermark: int = Field(default=10, ge=0)
+    hn_max_item_fetches_per_refresh: int = Field(default=100, ge=1)
 
     image_output_dir: str = "./data/images"
     image_quality: Literal["low", "medium", "high", "auto"] = "medium"

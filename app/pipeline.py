@@ -1,10 +1,11 @@
 import asyncio
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -120,6 +121,36 @@ def source_items_without_generated_post(session: Session, limit: int) -> list[So
     return list(session.scalars(statement))
 
 
+def count_source_items_without_generated_post(
+    session: Session,
+    source: str | None = None,
+) -> int:
+    statement = (
+        select(func.count(SourceItem.id))
+        .outerjoin(GeneratedPost, GeneratedPost.source_item_id == SourceItem.id)
+        .where(GeneratedPost.id.is_(None))
+    )
+    if source is not None:
+        statement = statement.where(SourceItem.source == source)
+
+    return int(session.scalar(statement) or 0)
+
+
+def existing_source_item_ids(
+    session: Session,
+    source: str,
+    source_item_ids: list[str],
+) -> set[str]:
+    if not source_item_ids:
+        return set()
+
+    statement = select(SourceItem.source_item_id).where(
+        SourceItem.source == source,
+        SourceItem.source_item_id.in_(source_item_ids),
+    )
+    return set(session.scalars(statement))
+
+
 async def ensure_article_text(
     session: Session,
     client: httpx.AsyncClient,
@@ -135,10 +166,32 @@ async def ensure_article_text(
 async def ingest_hacker_news(session: Session, settings: Settings) -> int:
     inserted_count = 0
     async with httpx.AsyncClient(timeout=15.0) as client:
-        logger.info("Fetching up to %s Hacker News story ids", settings.hn_fetch_limit)
-        story_ids = await fetch_best_story_ids(client, settings.hn_fetch_limit)
+        logger.info("Fetching up to %s Hacker News story ids", settings.hn_story_scan_limit)
+        story_ids = await fetch_best_story_ids(client, settings.hn_story_scan_limit)
         logger.info("Fetched %s Hacker News story ids", len(story_ids))
-        for story_id in story_ids:
+        story_id_strings = [str(story_id) for story_id in story_ids]
+        existing_story_ids = existing_source_item_ids(session, HN_SOURCE, story_id_strings)
+        hn_backlog_count = count_source_items_without_generated_post(session, HN_SOURCE)
+        item_fetch_limit = min(
+            max(settings.source_backlog_target - hn_backlog_count, 0),
+            settings.hn_max_item_fetches_per_refresh,
+        )
+        if item_fetch_limit == 0:
+            logger.info(
+                "Hacker News backlog has %s source items; skipping item fetches",
+                hn_backlog_count,
+            )
+            return inserted_count
+
+        unseen_story_ids = [
+            story_id for story_id in story_ids if str(story_id) not in existing_story_ids
+        ]
+        logger.info(
+            "Found %s unseen Hacker News ids; fetching up to %s items",
+            len(unseen_story_ids),
+            item_fetch_limit,
+        )
+        for story_id in unseen_story_ids[:item_fetch_limit]:
             logger.info("Fetching Hacker News item %s", story_id)
             item = await fetch_item(client, story_id)
             if not is_valid_story(item):
@@ -157,6 +210,27 @@ async def ingest_hacker_news(session: Session, settings: Settings) -> int:
                 logger.info("Hacker News item %s already exists; skipping insert", story_id)
 
     return inserted_count
+
+
+def should_refresh_hacker_news(
+    now: datetime,
+    last_hn_refresh_attempt_at: datetime | None,
+    hn_backlog_count: int,
+    settings: Settings,
+    *,
+    was_hn_backlog_below_low_watermark: bool,
+) -> bool:
+    if last_hn_refresh_attempt_at is None:
+        return True
+
+    seconds_since_refresh_attempt = (now - last_hn_refresh_attempt_at).total_seconds()
+    if seconds_since_refresh_attempt >= settings.hn_refresh_interval_seconds:
+        return True
+
+    return (
+        hn_backlog_count < settings.source_backlog_low_watermark
+        and not was_hn_backlog_below_low_watermark
+    )
 
 
 async def generate_missing_posts(session: Session, settings: Settings) -> int:
@@ -231,10 +305,14 @@ async def generate_missing_posts(session: Session, settings: Settings) -> int:
 async def run_pipeline_once(
     session_factory: sessionmaker[Session],
     settings: Settings,
+    *,
+    refresh_hacker_news: bool = True,
 ) -> None:
     logger.info("Pipeline pass started")
     with session_factory() as session:
-        inserted_count = await ingest_hacker_news(session, settings)
+        inserted_count = 0
+        if refresh_hacker_news:
+            inserted_count = await ingest_hacker_news(session, settings)
         generated_count = await generate_missing_posts(session, settings)
 
     logger.info(
@@ -248,9 +326,31 @@ async def run_pipeline_loop(
     session_factory: sessionmaker[Session],
     settings: Settings,
 ) -> None:
+    last_hn_refresh_attempt_at: datetime | None = None
+    was_hn_backlog_below_low_watermark = False
     while True:
         try:
-            await run_pipeline_once(session_factory, settings)
+            now = utc_now()
+            with session_factory() as session:
+                hn_backlog_count = count_source_items_without_generated_post(session, HN_SOURCE)
+            refresh_hacker_news = should_refresh_hacker_news(
+                now,
+                last_hn_refresh_attempt_at,
+                hn_backlog_count,
+                settings,
+                was_hn_backlog_below_low_watermark=was_hn_backlog_below_low_watermark,
+            )
+            was_hn_backlog_below_low_watermark = (
+                hn_backlog_count < settings.source_backlog_low_watermark
+            )
+            if refresh_hacker_news:
+                last_hn_refresh_attempt_at = now
+
+            await run_pipeline_once(
+                session_factory,
+                settings,
+                refresh_hacker_news=refresh_hacker_news,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -258,6 +358,6 @@ async def run_pipeline_loop(
 
         logger.info(
             "Sleeping %s seconds before next pipeline pass",
-            settings.hn_pipeline_interval_seconds,
+            settings.post_generation_interval_seconds,
         )
-        await asyncio.sleep(settings.hn_pipeline_interval_seconds)
+        await asyncio.sleep(settings.post_generation_interval_seconds)
