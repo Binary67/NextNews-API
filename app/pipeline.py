@@ -188,10 +188,15 @@ async def ensure_article_text(
     client: httpx.AsyncClient,
     source_item: SourceItem,
 ) -> None:
-    if source_item.article_text or not source_item.url:
+    if (
+        source_item.article_text is not None
+        or not source_item.url
+        or source_item.article_fetched_at is not None
+    ):
         return
 
     source_item.article_text = await fetch_article_text(client, source_item.url)
+    source_item.article_fetched_at = utc_now()
     session.commit()
 
 

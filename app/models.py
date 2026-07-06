@@ -25,6 +25,10 @@ class SourceItem(Base):
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     article_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    article_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     raw_json: Mapped[dict] = mapped_column(JSON)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

@@ -501,3 +501,96 @@ def test_generate_missing_posts_retries_after_failed_generation(tmp_path, monkey
         posts = session.scalars(select(GeneratedPost)).all()
         assert len(posts) == 1
         assert posts[0].status == "ready"
+
+
+def test_generate_missing_posts_does_not_refetch_empty_article_after_retry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        database_url="sqlite://",
+        post_generation_interval_seconds=60,
+        image_output_dir=str(tmp_path / "images"),
+        azure_openai_llm_endpoint="https://example.openai.azure.com",
+        azure_openai_llm_api_key="llm-key",
+        azure_openai_llm_deployment="llm",
+        azure_openai_quality_filter_deployment="gpt-5.4-mini",
+        azure_openai_image_endpoint="https://example.cognitiveservices.azure.com",
+        azure_openai_image_api_key="image-key",
+        azure_openai_image_deployment="image",
+    )
+    engine = create_app_engine(settings.database_url)
+    init_database(engine, settings.database_url)
+    session_factory = create_session_factory(engine)
+    fetch_calls: list[str] = []
+    content_article_texts: list[str | None] = []
+
+    class FailingAzureResponsesClient:
+        def __init__(self, settings: Settings) -> None:
+            pass
+
+        async def evaluate_source_item_quality(
+            self,
+            source_item: SourceItem,
+        ) -> SourceQualityEvaluation:
+            return SourceQualityEvaluation(
+                accepted=True,
+                reason="Substantive source",
+                categories=[],
+            )
+
+        async def generate_post_content(self, source_item: SourceItem) -> GeneratedPostContent:
+            content_article_texts.append(source_item.article_text)
+            raise RuntimeError("temporary failure")
+
+        async def generate_image(self, prompt: str) -> bytes:
+            raise AssertionError("image generation should not run")
+
+    class SuccessfulAzureResponsesClient:
+        def __init__(self, settings: Settings) -> None:
+            pass
+
+        async def evaluate_source_item_quality(
+            self,
+            source_item: SourceItem,
+        ) -> SourceQualityEvaluation:
+            return SourceQualityEvaluation(
+                accepted=True,
+                reason="Substantive source",
+                categories=[],
+            )
+
+        async def generate_post_content(self, source_item: SourceItem) -> GeneratedPostContent:
+            content_article_texts.append(source_item.article_text)
+            return generated_content()
+
+        async def generate_image(self, prompt: str) -> bytes:
+            return b"image-bytes"
+
+    async def empty_fetch_article_text(client, url: str) -> str | None:
+        fetch_calls.append(url)
+        return None
+
+    monkeypatch.setattr("app.pipeline.fetch_article_text", empty_fetch_article_text)
+
+    with session_factory() as session:
+        source_item = insert_source_item(session, hn_item(1))
+        assert source_item is not None
+
+        monkeypatch.setattr("app.pipeline.AzureResponsesClient", FailingAzureResponsesClient)
+        failed_count = asyncio.run(generate_missing_posts(session, settings))
+
+        assert failed_count == 0
+        assert source_item.article_text is None
+        assert source_item.article_fetched_at is not None
+        assert fetch_calls == ["https://example.com/sqlite"]
+
+        monkeypatch.setattr("app.pipeline.AzureResponsesClient", SuccessfulAzureResponsesClient)
+        generated_count = asyncio.run(generate_missing_posts(session, settings))
+
+        assert generated_count == 1
+        assert fetch_calls == ["https://example.com/sqlite"]
+        assert content_article_texts == [None, None]
+        posts = session.scalars(select(GeneratedPost)).all()
+        assert len(posts) == 1
+        assert posts[0].status == "ready"
