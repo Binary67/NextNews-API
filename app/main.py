@@ -12,11 +12,29 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.ai import AzureResponsesClient, ThreadReply
 from app.config import Settings, get_settings
 from app.database import create_app_engine, create_session_factory, init_database
-from app.models import GeneratedPost, PostLike, SourceItem
+from app.models import (
+    ConversationMessage,
+    ConversationThread,
+    GeneratedPost,
+    PostLike,
+    SourceItem,
+    utc_now,
+)
 from app.pipeline import run_pipeline_loop
-from app.schemas import HealthResponse, PostDetail, PostInteractionState, PostListItem
+from app.schemas import (
+    ConversationCitation,
+    ConversationMessageRequest,
+    ConversationMessageResponse,
+    ConversationThreadResponse,
+    ConversationThreadSummary,
+    HealthResponse,
+    PostDetail,
+    PostInteractionState,
+    PostListItem,
+)
 
 
 def _prune_old_logs(log_dir: Path, keep_count: int = 3) -> None:
@@ -91,6 +109,102 @@ def _ready_post_or_404(session: Session, post_id: int) -> GeneratedPost:
     return post
 
 
+def _ready_thread_or_404(session: Session, thread_id: int) -> ConversationThread:
+    thread = session.get(ConversationThread, thread_id)
+    if thread is None or thread.post.status != "ready":
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    return thread
+
+
+def _conversation_client_or_503(settings: Settings) -> AzureResponsesClient:
+    if not settings.azure_llm_configured:
+        raise HTTPException(status_code=503, detail="Azure OpenAI LLM is not configured")
+
+    try:
+        return AzureResponsesClient(settings)
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+def _message_to_schema(message: ConversationMessage) -> ConversationMessageResponse:
+    return ConversationMessageResponse(
+        id=message.id,
+        thread_id=message.thread_id,
+        role=message.role,
+        content=message.content,
+        citations=[
+            ConversationCitation(
+                url=citation["url"],
+                title=citation.get("title"),
+            )
+            for citation in message.citations or []
+            if citation.get("url")
+        ],
+        response_id=message.response_id,
+        llm_deployment=message.llm_deployment,
+        created_at=message.created_at,
+    )
+
+
+def _thread_messages(session: Session, thread_id: int) -> list[ConversationMessage]:
+    statement = (
+        select(ConversationMessage)
+        .where(ConversationMessage.thread_id == thread_id)
+        .order_by(ConversationMessage.created_at, ConversationMessage.id)
+    )
+    return list(session.scalars(statement).all())
+
+
+def _thread_to_schema(
+    thread: ConversationThread,
+    messages: list[ConversationMessage],
+) -> ConversationThreadResponse:
+    return ConversationThreadResponse(
+        thread_id=thread.id,
+        post_id=thread.post_id,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+        messages=[_message_to_schema(message) for message in messages],
+    )
+
+
+def _thread_summary_to_schema(
+    thread: ConversationThread,
+    messages: list[ConversationMessage],
+) -> ConversationThreadSummary:
+    last_message = messages[-1] if messages else None
+    return ConversationThreadSummary(
+        thread_id=thread.id,
+        post_id=thread.post_id,
+        message_count=len(messages),
+        last_message=_message_to_schema(last_message) if last_message is not None else None,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+    )
+
+
+def _assistant_message(
+    thread_id: int,
+    reply: ThreadReply,
+    settings: Settings,
+) -> ConversationMessage:
+    return ConversationMessage(
+        thread_id=thread_id,
+        role="assistant",
+        content=reply.content,
+        citations=[
+            {
+                "url": citation.url,
+                "title": citation.title,
+            }
+            for citation in reply.citations
+        ],
+        response_id=reply.response_id,
+        llm_deployment=settings.azure_openai_llm_deployment,
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -159,6 +273,86 @@ def create_app(
         post = _ready_post_or_404(session, post_id)
 
         return PostDetail(**_post_to_schema(post, app_settings).model_dump())
+
+    @app.post("/posts/{post_id}/threads", response_model=ConversationThreadResponse)
+    async def create_thread(
+        post_id: int,
+        request: ConversationMessageRequest,
+        session: Session = Depends(get_session),
+    ) -> ConversationThreadResponse:
+        post = _ready_post_or_404(session, post_id)
+        ai_client = _conversation_client_or_503(app_settings)
+        reply = await ai_client.generate_thread_reply(post, [], request.message)
+
+        thread = ConversationThread(post_id=post.id)
+        session.add(thread)
+        session.flush()
+        session.add_all(
+            [
+                ConversationMessage(
+                    thread_id=thread.id,
+                    role="user",
+                    content=request.message,
+                ),
+                _assistant_message(thread.id, reply, app_settings),
+            ]
+        )
+        session.commit()
+        session.refresh(thread)
+
+        return _thread_to_schema(thread, _thread_messages(session, thread.id))
+
+    @app.get("/posts/{post_id}/threads", response_model=list[ConversationThreadSummary])
+    def list_threads(
+        post_id: int,
+        session: Session = Depends(get_session),
+    ) -> list[ConversationThreadSummary]:
+        post = _ready_post_or_404(session, post_id)
+        statement = (
+            select(ConversationThread)
+            .where(ConversationThread.post_id == post.id)
+            .order_by(ConversationThread.updated_at.desc(), ConversationThread.id.desc())
+        )
+        threads = session.scalars(statement).all()
+        return [
+            _thread_summary_to_schema(thread, _thread_messages(session, thread.id))
+            for thread in threads
+        ]
+
+    @app.get("/threads/{thread_id}", response_model=ConversationThreadResponse)
+    def get_thread(
+        thread_id: int,
+        session: Session = Depends(get_session),
+    ) -> ConversationThreadResponse:
+        thread = _ready_thread_or_404(session, thread_id)
+        return _thread_to_schema(thread, _thread_messages(session, thread.id))
+
+    @app.post("/threads/{thread_id}/messages", response_model=ConversationThreadResponse)
+    async def add_thread_message(
+        thread_id: int,
+        request: ConversationMessageRequest,
+        session: Session = Depends(get_session),
+    ) -> ConversationThreadResponse:
+        thread = _ready_thread_or_404(session, thread_id)
+        messages = _thread_messages(session, thread.id)
+        ai_client = _conversation_client_or_503(app_settings)
+        reply = await ai_client.generate_thread_reply(thread.post, messages, request.message)
+
+        thread.updated_at = utc_now()
+        session.add_all(
+            [
+                ConversationMessage(
+                    thread_id=thread.id,
+                    role="user",
+                    content=request.message,
+                ),
+                _assistant_message(thread.id, reply, app_settings),
+            ]
+        )
+        session.commit()
+        session.refresh(thread)
+
+        return _thread_to_schema(thread, _thread_messages(session, thread.id))
 
     @app.post("/posts/{post_id}/like", response_model=PostInteractionState)
     def like_post(

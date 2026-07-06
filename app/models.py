@@ -63,6 +63,9 @@ class GeneratedPost(Base):
 
     source_item: Mapped[SourceItem] = relationship(back_populates="generated_post")
     like: Mapped["PostLike | None"] = relationship(back_populates="post", uselist=False)
+    conversation_threads: Mapped[list["ConversationThread"]] = relationship(
+        back_populates="post",
+    )
 
 
 class PostLike(Base):
@@ -77,3 +80,39 @@ class PostLike(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     post: Mapped[GeneratedPost] = relationship(back_populates="like")
+
+
+class ConversationThread(Base):
+    __tablename__ = "conversation_threads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    post_id: Mapped[int] = mapped_column(ForeignKey("generated_posts.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+
+    post: Mapped[GeneratedPost] = relationship(back_populates="conversation_threads")
+    messages: Mapped[list["ConversationMessage"]] = relationship(
+        back_populates="thread",
+    )
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    thread_id: Mapped[int] = mapped_column(
+        ForeignKey("conversation_threads.id"),
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    citations: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    response_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    llm_deployment: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    thread: Mapped[ConversationThread] = relationship(back_populates="messages")

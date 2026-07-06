@@ -117,6 +117,34 @@ Marks a ready post as liked. The operation is idempotent and returns:
 
 Removes the local like from a ready post. The operation is idempotent and returns the updated interaction state.
 
+### `POST /posts/{post_id}/threads`
+
+Creates a new conversation thread for a ready post. The request body is:
+
+```json
+{"message": "What does this mean for developers?"}
+```
+
+The API stores the user message and the assistant reply after the Azure Responses API call succeeds. Replies use `AZURE_OPENAI_LLM_DEPLOYMENT` with the native `web_search` tool.
+
+### `GET /posts/{post_id}/threads`
+
+Returns summaries for conversation threads on one ready post.
+
+### `GET /threads/{thread_id}`
+
+Returns one globally unique thread and its messages.
+
+### `POST /threads/{thread_id}/messages`
+
+Continues an existing thread. The request body is:
+
+```json
+{"message": "Can you explain that more simply?"}
+```
+
+Only messages from that thread are used as conversation history.
+
 ### `GET /images/{image_name}`
 
 Serves generated images from `IMAGE_OUTPUT_DIR`.

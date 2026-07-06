@@ -6,7 +6,7 @@ import pytest
 
 from app.ai import POST_SCHEMA, QUALITY_FILTER_SCHEMA, AzureResponsesClient
 from app.config import Settings
-from app.models import SourceItem
+from app.models import ConversationMessage, GeneratedPost, SourceItem
 
 
 class FakeImageResponse:
@@ -50,11 +50,19 @@ class FakeResponses:
 
     async def create(self, **kwargs):
         self.requests.append(kwargs)
-        response_name = kwargs["text"]["format"]["name"]
+        response_name = kwargs.get("text", {}).get("format", {}).get("name")
 
         class Response:
-            def __init__(self, output_text: str) -> None:
+            def __init__(
+                self,
+                output_text: str,
+                *,
+                response_id: str | None = None,
+                output: list[dict] | None = None,
+            ) -> None:
                 self.output_text = output_text
+                self.id = response_id
+                self.output = output or []
 
         if response_name == "nextnews_source_quality_filter":
             return Response(
@@ -65,6 +73,30 @@ class FakeResponses:
                         "categories": ["advertisement"],
                     }
                 )
+            )
+
+        if response_name is None:
+            return Response(
+                "The release gives developers a faster workflow.",
+                response_id="resp-123",
+                output=[
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "The release gives developers a faster workflow.",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://example.com/source",
+                                        "title": "Source title",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
             )
 
         return Response(
@@ -139,6 +171,64 @@ def test_generate_post_content_uses_article_text_without_source_framing(
     assert "realistic editorial image" not in schema_text
     assert "under " not in schema_text
     assert "concise" not in schema_text
+
+
+def test_generate_thread_reply_uses_web_search_and_extracts_citations(
+    monkeypatch,
+) -> None:
+    FakeResponses.requests = []
+    monkeypatch.setattr("app.ai.AsyncOpenAI", FakeOpenAI)
+
+    source_item = SourceItem(
+        source="hacker_news",
+        source_item_id="123",
+        title="Original submission title",
+        url="https://example.com/article",
+        author="author",
+        score=42,
+        article_text="The article explains why the release matters to developers.",
+        raw_json={"id": 123},
+    )
+    post = GeneratedPost(
+        title="Generated title",
+        description="Generated description",
+        content="Generated content",
+        source_item=source_item,
+        status="ready",
+    )
+    prior_messages = [
+        ConversationMessage(role="user", content="Earlier question"),
+        ConversationMessage(role="assistant", content="Earlier answer"),
+    ]
+
+    client = AzureResponsesClient(configured_settings())
+    result = asyncio.run(
+        client.generate_thread_reply(
+            post,
+            prior_messages,
+            "What does this mean for developers?",
+        )
+    )
+
+    request = FakeResponses.requests[0]
+    request_input = json.loads(request["input"])
+
+    assert request["model"] == "llm-deployment"
+    assert request["tools"] == [{"type": "web_search"}]
+    assert request["tool_choice"] == "auto"
+    assert request["include"] == ["web_search_call.action.sources"]
+    assert request_input["post"]["title"] == "Generated title"
+    assert request_input["post"]["source_url"] == "https://example.com/article"
+    assert request_input["post"]["article_text"] == source_item.article_text
+    assert request_input["thread_messages"] == [
+        {"role": "user", "content": "Earlier question"},
+        {"role": "assistant", "content": "Earlier answer"},
+    ]
+    assert request_input["user_message"] == "What does this mean for developers?"
+    assert result.content == "The release gives developers a faster workflow."
+    assert result.response_id == "resp-123"
+    assert result.citations[0].url == "https://example.com/source"
+    assert result.citations[0].title == "Source title"
 
 
 def test_evaluate_source_item_quality_uses_filter_deployment(monkeypatch) -> None:

@@ -1,6 +1,7 @@
 import base64
 import json
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -8,7 +9,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from app.config import Settings
-from app.models import SourceItem
+from app.models import ConversationMessage, GeneratedPost, SourceItem
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,19 @@ class SourceQualityEvaluation:
     accepted: bool
     reason: str
     categories: list[str]
+
+
+@dataclass(frozen=True)
+class ThreadReplyCitation:
+    url: str
+    title: str | None = None
+
+
+@dataclass(frozen=True)
+class ThreadReply:
+    content: str
+    citations: list[ThreadReplyCitation]
+    response_id: str | None = None
 
 
 IMAGE_STYLES: tuple[str, ...] = (
@@ -56,6 +70,42 @@ IMAGE_STYLES: tuple[str, ...] = (
 
 def random_image_style() -> str:
     return random.choice(IMAGE_STYLES)
+
+
+def _response_value(item: object, key: str, default: object = None) -> object:
+    if isinstance(item, dict):
+        return item.get(key, default)
+
+    return getattr(item, key, default)
+
+
+def _extract_url_citations(response: object) -> list[ThreadReplyCitation]:
+    citations: list[ThreadReplyCitation] = []
+    seen_urls: set[str] = set()
+
+    for output_item in _response_value(response, "output", []) or []:
+        if _response_value(output_item, "type") != "message":
+            continue
+
+        for content_item in _response_value(output_item, "content", []) or []:
+            for annotation in _response_value(content_item, "annotations", []) or []:
+                if _response_value(annotation, "type") != "url_citation":
+                    continue
+
+                url = _response_value(annotation, "url")
+                if not isinstance(url, str) or not url or url in seen_urls:
+                    continue
+
+                title = _response_value(annotation, "title")
+                citations.append(
+                    ThreadReplyCitation(
+                        url=url,
+                        title=title if isinstance(title, str) and title else None,
+                    )
+                )
+                seen_urls.add(url)
+
+    return citations
 
 
 POST_SCHEMA = {
@@ -120,8 +170,8 @@ QUALITY_FILTER_SCHEMA = {
 
 class AzureResponsesClient:
     def __init__(self, settings: Settings) -> None:
-        if not settings.azure_configured:
-            raise RuntimeError("Azure OpenAI settings are not fully configured")
+        if not settings.azure_llm_configured:
+            raise RuntimeError("Azure OpenAI LLM settings are not fully configured")
 
         self._settings = settings
         self._client = AsyncOpenAI(
@@ -216,6 +266,54 @@ class AzureResponsesClient:
             description=payload["description"].strip(),
             content=payload["content"].strip(),
             image_prompt=payload["image_prompt"].strip(),
+        )
+
+    async def generate_thread_reply(
+        self,
+        post: GeneratedPost,
+        prior_messages: Sequence[ConversationMessage],
+        user_message: str,
+    ) -> ThreadReply:
+        source_item = post.source_item
+        response = await self._client.responses.create(
+            model=self._settings.azure_openai_llm_deployment,
+            instructions=(
+                "You answer user questions in a NextNews conversation thread. Ground "
+                "the answer in the provided post context and same-thread conversation "
+                "history. Use web search when current or external context would improve "
+                "the answer. Do not use other post comments or other threads as context. "
+                "Do not invent unsupported facts, numbers, quotes, or conclusions. Keep "
+                "the answer clear, useful, and conversational."
+            ),
+            tools=[{"type": "web_search"}],
+            tool_choice="auto",
+            include=["web_search_call.action.sources"],
+            input=json.dumps(
+                {
+                    "post": {
+                        "title": post.title,
+                        "description": post.description,
+                        "content": post.content,
+                        "source_url": source_item.url,
+                        "article_text": source_item.article_text,
+                    },
+                    "thread_messages": [
+                        {
+                            "role": message.role,
+                            "content": message.content,
+                        }
+                        for message in prior_messages
+                    ],
+                    "user_message": user_message,
+                }
+            ),
+        )
+
+        response_id = _response_value(response, "id")
+        return ThreadReply(
+            content=response.output_text.strip(),
+            citations=_extract_url_citations(response),
+            response_id=response_id if isinstance(response_id, str) else None,
         )
 
     async def generate_image(self, prompt: str) -> bytes:
