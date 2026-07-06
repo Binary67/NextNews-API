@@ -5,7 +5,13 @@ from app.ai import ThreadReply, ThreadReplyCitation
 from app.config import Settings
 from app.database import create_app_engine, create_session_factory, init_database
 from app.main import create_app
-from app.models import GeneratedPost, SourceItem, utc_now
+from app.models import (
+    ConversationMessage,
+    ConversationThread,
+    GeneratedPost,
+    SourceItem,
+    utc_now,
+)
 
 
 def make_client(tmp_path, *, azure_llm_configured: bool = False):
@@ -69,6 +75,16 @@ class FakeConversationClient:
             ],
             response_id=f"resp-{reply_number}",
         )
+
+
+class FailingConversationClient(FakeConversationClient):
+    async def generate_thread_reply(
+        self,
+        post: GeneratedPost,
+        prior_messages,
+        user_message: str,
+    ) -> ThreadReply:
+        raise RuntimeError("LLM unavailable")
 
 
 def seed_posts(settings: Settings) -> tuple[int, int]:
@@ -153,7 +169,10 @@ def test_post_detail_returns_ready_post_and_hides_non_ready(tmp_path) -> None:
     assert missing_response.status_code == 404
 
 
-def test_create_thread_returns_user_and_assistant_messages(tmp_path, monkeypatch) -> None:
+def test_create_thread_returns_user_message_then_assistant_reply(
+    tmp_path,
+    monkeypatch,
+) -> None:
     FakeConversationClient.requests = []
     monkeypatch.setattr("app.main.AzureResponsesClient", FakeConversationClient)
     client, settings = make_client(tmp_path, azure_llm_configured=True)
@@ -171,23 +190,27 @@ def test_create_thread_returns_user_and_assistant_messages(tmp_path, monkeypatch
     assert create_response.status_code == 200
     body = create_response.json()
     assert body["post_id"] == ready_id
-    assert [message["role"] for message in body["messages"]] == ["user", "assistant"]
+    assert [message["role"] for message in body["messages"]] == ["user"]
     assert body["messages"][0]["content"] == "What does this mean for developers?"
-    assert body["messages"][1]["content"] == "Assistant reply 1"
-    assert body["messages"][1]["citations"] == [
+    detail_body = detail_response.json()
+    assert [message["role"] for message in detail_body["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert detail_body["messages"][1]["content"] == "Assistant reply 1"
+    assert detail_body["messages"][1]["citations"] == [
         {
             "url": "https://example.com/source-1",
             "title": "Source 1",
         }
     ]
-    assert body["messages"][1]["response_id"] == "resp-1"
-    assert body["messages"][1]["llm_deployment"] == "llm-deployment"
+    assert detail_body["messages"][1]["response_id"] == "resp-1"
+    assert detail_body["messages"][1]["llm_deployment"] == "llm-deployment"
     assert FakeConversationClient.requests[0]["prior_messages"] == []
     assert FakeConversationClient.requests[0]["user_message"] == (
         "What does this mean for developers?"
     )
     assert FakeConversationClient.requests[0]["llm_deployment"] == "llm-deployment"
-    assert detail_response.json() == body
     assert list_response.json()[0]["thread_id"] == thread_id
     assert list_response.json()[0]["message_count"] == 2
     assert list_response.json()[0]["last_message"]["content"] == "Assistant reply 1"
@@ -212,10 +235,16 @@ def test_continuing_thread_uses_only_that_thread_history(tmp_path, monkeypatch) 
             f"/threads/{first_thread['thread_id']}/messages",
             json={"message": "Follow up"},
         )
+        first_detail = client.get(f"/threads/{first_thread['thread_id']}")
         second_detail = client.get(f"/threads/{second_thread['thread_id']}")
 
     assert continued.status_code == 200
     assert [message["content"] for message in continued.json()["messages"]] == [
+        "First thread question",
+        "Assistant reply 1",
+        "Follow up",
+    ]
+    assert [message["content"] for message in first_detail.json()["messages"]] == [
         "First thread question",
         "Assistant reply 1",
         "Follow up",
@@ -232,6 +261,68 @@ def test_continuing_thread_uses_only_that_thread_history(tmp_path, monkeypatch) 
         "Second thread question",
         "Assistant reply 2",
     ]
+
+
+def test_continuing_thread_rejects_pending_assistant_reply(tmp_path, monkeypatch) -> None:
+    FakeConversationClient.requests = []
+    monkeypatch.setattr("app.main.AzureResponsesClient", FakeConversationClient)
+    client, settings = make_client(tmp_path, azure_llm_configured=True)
+    ready_id, _ = seed_posts(settings)
+
+    engine = create_app_engine(settings.database_url)
+    session_factory = create_session_factory(engine)
+    with session_factory() as session:
+        thread = ConversationThread(post_id=ready_id)
+        session.add(thread)
+        session.flush()
+        session.add(
+            ConversationMessage(
+                thread_id=thread.id,
+                role="user",
+                content="Pending question",
+            )
+        )
+        session.commit()
+        thread_id = thread.id
+
+    with client:
+        response = client.post(
+            f"/threads/{thread_id}/messages",
+            json={"message": "Another follow up"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Assistant reply is still pending"
+    assert FakeConversationClient.requests == []
+
+
+def test_assistant_generation_failure_appends_error_message(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.main.AzureResponsesClient", FailingConversationClient)
+    client, settings = make_client(tmp_path, azure_llm_configured=True)
+    ready_id, _ = seed_posts(settings)
+
+    with client:
+        create_response = client.post(
+            f"/posts/{ready_id}/threads",
+            json={"message": "Question"},
+        )
+        thread_id = create_response.json()["thread_id"]
+        detail_response = client.get(f"/threads/{thread_id}")
+
+    assert create_response.status_code == 200
+    assert [message["role"] for message in create_response.json()["messages"]] == [
+        "user"
+    ]
+    assert [message["role"] for message in detail_response.json()["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert detail_response.json()["messages"][1]["content"] == (
+        "Sorry, I couldn't generate a reply. Please try again."
+    )
 
 
 def test_thread_endpoints_hide_missing_and_non_ready_posts(tmp_path, monkeypatch) -> None:

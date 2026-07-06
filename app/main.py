@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -34,6 +34,9 @@ from app.schemas import (
     PostInteractionState,
     PostListItem,
 )
+
+logger = logging.getLogger(__name__)
+ASSISTANT_REPLY_FAILURE_MESSAGE = "Sorry, I couldn't generate a reply. Please try again."
 
 
 def _prune_old_logs(log_dir: Path, keep_count: int = 3) -> None:
@@ -204,6 +207,95 @@ def _assistant_message(
     )
 
 
+def _failure_assistant_message(thread_id: int) -> ConversationMessage:
+    return ConversationMessage(
+        thread_id=thread_id,
+        role="assistant",
+        content=ASSISTANT_REPLY_FAILURE_MESSAGE,
+    )
+
+
+def _thread_is_waiting_for_reply(
+    messages: list[ConversationMessage],
+    user_message_id: int,
+) -> bool:
+    if not messages:
+        return False
+
+    latest_message = messages[-1]
+    return latest_message.id == user_message_id and latest_message.role == "user"
+
+
+def _append_assistant_generation_failure(
+    session_factory: sessionmaker[Session],
+    thread_id: int,
+    user_message_id: int,
+) -> None:
+    try:
+        with session_factory() as session:
+            thread = session.get(ConversationThread, thread_id)
+            if thread is None or thread.post.status != "ready":
+                return
+
+            messages = _thread_messages(session, thread.id)
+            if not _thread_is_waiting_for_reply(messages, user_message_id):
+                return
+
+            thread.updated_at = utc_now()
+            session.add(_failure_assistant_message(thread.id))
+            session.commit()
+    except Exception:
+        logger.exception(
+            "Failed to store assistant generation failure for thread %s",
+            thread_id,
+        )
+
+
+async def _generate_assistant_reply(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    thread_id: int,
+    user_message_id: int,
+) -> None:
+    try:
+        with session_factory() as session:
+            thread = session.get(ConversationThread, thread_id)
+            if thread is None or thread.post.status != "ready":
+                return
+
+            messages = _thread_messages(session, thread.id)
+            user_message = next(
+                (message for message in messages if message.id == user_message_id),
+                None,
+            )
+            if user_message is None:
+                return
+
+            prior_messages = [
+                message for message in messages if message.id < user_message.id
+            ]
+            ai_client = AzureResponsesClient(settings)
+            reply = await ai_client.generate_thread_reply(
+                thread.post,
+                prior_messages,
+                user_message.content,
+            )
+            messages = _thread_messages(session, thread.id)
+            if not _thread_is_waiting_for_reply(messages, user_message.id):
+                return
+
+            thread.updated_at = utc_now()
+            session.add(_assistant_message(thread.id, reply, settings))
+            session.commit()
+    except Exception:
+        logger.exception("Failed to generate assistant reply for thread %s", thread_id)
+        _append_assistant_generation_failure(
+            session_factory,
+            thread_id,
+            user_message_id,
+        )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -280,27 +372,32 @@ def create_app(
     async def create_thread(
         post_id: int,
         request: ConversationMessageRequest,
+        background_tasks: BackgroundTasks,
         session: Session = Depends(get_session),
     ) -> ConversationThreadResponse:
         post = _ready_post_or_404(session, post_id)
-        ai_client = _conversation_client_or_503(app_settings)
-        reply = await ai_client.generate_thread_reply(post, [], request.message)
+        _conversation_client_or_503(app_settings)
 
         thread = ConversationThread(post_id=post.id)
         session.add(thread)
         session.flush()
-        session.add_all(
-            [
-                ConversationMessage(
-                    thread_id=thread.id,
-                    role="user",
-                    content=request.message,
-                ),
-                _assistant_message(thread.id, reply, app_settings),
-            ]
+        user_message = ConversationMessage(
+            thread_id=thread.id,
+            role="user",
+            content=request.message,
         )
+        session.add(user_message)
         session.commit()
         session.refresh(thread)
+        session.refresh(user_message)
+
+        background_tasks.add_task(
+            _generate_assistant_reply,
+            session_factory,
+            app_settings,
+            thread.id,
+            user_message.id,
+        )
 
         return _thread_to_schema(thread, _thread_messages(session, thread.id))
 
@@ -333,26 +430,36 @@ def create_app(
     async def add_thread_message(
         thread_id: int,
         request: ConversationMessageRequest,
+        background_tasks: BackgroundTasks,
         session: Session = Depends(get_session),
     ) -> ConversationThreadResponse:
         thread = _ready_thread_or_404(session, thread_id)
         messages = _thread_messages(session, thread.id)
-        ai_client = _conversation_client_or_503(app_settings)
-        reply = await ai_client.generate_thread_reply(thread.post, messages, request.message)
+        if messages and messages[-1].role == "user":
+            raise HTTPException(
+                status_code=409,
+                detail="Assistant reply is still pending",
+            )
+        _conversation_client_or_503(app_settings)
 
         thread.updated_at = utc_now()
-        session.add_all(
-            [
-                ConversationMessage(
-                    thread_id=thread.id,
-                    role="user",
-                    content=request.message,
-                ),
-                _assistant_message(thread.id, reply, app_settings),
-            ]
+        user_message = ConversationMessage(
+            thread_id=thread.id,
+            role="user",
+            content=request.message,
         )
+        session.add(user_message)
         session.commit()
         session.refresh(thread)
+        session.refresh(user_message)
+
+        background_tasks.add_task(
+            _generate_assistant_reply,
+            session_factory,
+            app_settings,
+            thread.id,
+            user_message.id,
+        )
 
         return _thread_to_schema(thread, _thread_messages(session, thread.id))
 

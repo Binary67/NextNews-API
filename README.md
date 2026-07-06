@@ -142,7 +142,7 @@ Creates a new conversation thread for a ready post. The request body is:
 {"message": "What does this mean for developers?"}
 ```
 
-The API stores the user message and the assistant reply after the Azure Responses API call succeeds. Replies use `AZURE_OPENAI_LLM_DEPLOYMENT` with the native `web_search` tool. The frontend presents these threads as per-post replies.
+The API stores the user message immediately and returns the thread before the assistant reply is ready. The assistant reply is generated asynchronously with `AZURE_OPENAI_LLM_DEPLOYMENT` and the native `web_search` tool, then added to the thread. The frontend can poll `GET /threads/{thread_id}` while the last message role is `user`.
 
 ### `GET /posts/{post_id}/threads`
 
@@ -160,7 +160,7 @@ Continues an existing thread. The request body is:
 {"message": "Can you explain that more simply?"}
 ```
 
-Only messages from that thread are used as conversation history.
+Only messages from that thread are used as conversation history. The user message is stored immediately and the assistant reply is added asynchronously. If the latest thread message is still waiting for an assistant reply, the endpoint returns `409 Conflict`.
 
 ### `GET /images/{image_name}`
 

@@ -339,7 +339,19 @@ class AzureResponsesClient:
                 json=body,
             )
 
-        response_data = response.json()
+        try:
+            response_data = response.json()
+        except ValueError as error:
+            if response.is_error:
+                message = response.text or "No response body"
+                raise RuntimeError(
+                    f"Azure image generation failed: unknown_error: {message}"
+                ) from error
+
+            raise RuntimeError(
+                "Azure image generation response was not valid JSON"
+            ) from error
+
         if response.is_error:
             error = response_data.get("error", {})
             code = error.get("code", "unknown_error")

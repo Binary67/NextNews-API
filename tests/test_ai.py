@@ -10,12 +10,23 @@ from app.models import ConversationMessage, GeneratedPost, SourceItem
 
 
 class FakeImageResponse:
-    def __init__(self, payload: dict, *, is_error: bool = False, text: str = "") -> None:
+    def __init__(
+        self,
+        payload: dict,
+        *,
+        is_error: bool = False,
+        text: str = "",
+        json_error: ValueError | None = None,
+    ) -> None:
         self._payload = payload
         self.is_error = is_error
         self.text = text
+        self._json_error = json_error
 
     def json(self) -> dict:
+        if self._json_error is not None:
+            raise self._json_error
+
         return self._payload
 
 
@@ -307,6 +318,42 @@ def test_generate_image_raises_for_azure_error_payload(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="contentFilter: blocked"):
         asyncio.run(client.generate_image("blocked prompt"))
+
+
+def test_generate_image_raises_clear_error_for_non_json_error_response(monkeypatch) -> None:
+    FakeAsyncClient.requests = []
+    FakeAsyncClient.response = FakeImageResponse(
+        {},
+        is_error=True,
+        text="Bad gateway",
+        json_error=ValueError("not json"),
+    )
+    monkeypatch.setattr("app.ai.httpx.AsyncClient", FakeAsyncClient)
+
+    client = AzureResponsesClient(configured_settings())
+
+    with pytest.raises(
+        RuntimeError,
+        match="Azure image generation failed: unknown_error: Bad gateway",
+    ):
+        asyncio.run(client.generate_image("prompt"))
+
+
+def test_generate_image_raises_for_non_json_success_response(monkeypatch) -> None:
+    FakeAsyncClient.requests = []
+    FakeAsyncClient.response = FakeImageResponse(
+        {},
+        json_error=ValueError("not json"),
+    )
+    monkeypatch.setattr("app.ai.httpx.AsyncClient", FakeAsyncClient)
+
+    client = AzureResponsesClient(configured_settings())
+
+    with pytest.raises(
+        RuntimeError,
+        match="Azure image generation response was not valid JSON",
+    ):
+        asyncio.run(client.generate_image("prompt"))
 
 
 def test_generate_image_raises_for_missing_b64_json(monkeypatch) -> None:
