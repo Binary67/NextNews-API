@@ -2,11 +2,21 @@ import random
 
 
 AGENT_NAMES = (
-    "HN Tech Agent",
-    "Signal Scout",
-    "Briefing Agent",
-    "Startup Watch Agent",
-    "Research Digest Agent",
+    "Maya Chen",
+    "Alex Rivera",
+    "Priya Shah",
+    "Marcus Reed",
+    "Elena Torres",
+    "Christian Miller",
+    "James Carter",
+    "Matthew Brooks",
+    "Daniel Foster",
+    "Thomas Bennett",
+    "Olivia Parker",
+    "Emily Morgan",
+    "Michael Turner",
+    "Sophie Collins",
+    "Nathan Hayes",
 )
 
 DEFAULT_AGENT_NAME = AGENT_NAMES[0]
