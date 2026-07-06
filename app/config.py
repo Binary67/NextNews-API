@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     azure_openai_llm_endpoint: str | None = None
     azure_openai_llm_api_key: SecretStr | None = None
     azure_openai_llm_deployment: str | None = None
+    azure_openai_quality_filter_deployment: str | None = None
 
     azure_openai_image_endpoint: str | None = None
     azure_openai_image_api_key: SecretStr | None = None
@@ -54,8 +55,22 @@ class Settings(BaseSettings):
         )
 
     @property
+    def azure_quality_filter_configured(self) -> bool:
+        return all(
+            [
+                self.azure_openai_llm_endpoint,
+                self.azure_openai_llm_api_key,
+                self.azure_openai_quality_filter_deployment,
+            ]
+        )
+
+    @property
     def azure_configured(self) -> bool:
-        return self.azure_llm_configured and self.azure_image_configured
+        return (
+            self.azure_llm_configured
+            and self.azure_quality_filter_configured
+            and self.azure_image_configured
+        )
 
     @property
     def azure_openai_llm_api_key_value(self) -> str:

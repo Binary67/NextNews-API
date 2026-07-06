@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.ai import POST_SCHEMA, AzureResponsesClient
+from app.ai import POST_SCHEMA, QUALITY_FILTER_SCHEMA, AzureResponsesClient
 from app.config import Settings
 from app.models import SourceItem
 
@@ -50,9 +50,25 @@ class FakeResponses:
 
     async def create(self, **kwargs):
         self.requests.append(kwargs)
+        response_name = kwargs["text"]["format"]["name"]
 
         class Response:
-            output_text = json.dumps(
+            def __init__(self, output_text: str) -> None:
+                self.output_text = output_text
+
+        if response_name == "nextnews_source_quality_filter":
+            return Response(
+                json.dumps(
+                    {
+                        "accepted": False,
+                        "reason": "The source is mostly promotional.",
+                        "categories": ["advertisement"],
+                    }
+                )
+            )
+
+        return Response(
+            json.dumps(
                 {
                     "title": "Useful release for developers",
                     "description": "A new release improves developer workflows.",
@@ -60,8 +76,7 @@ class FakeResponses:
                     "image_prompt": "Realistic editorial photograph of software engineers",
                 }
             )
-
-        return Response()
+        )
 
 
 class FakeOpenAI:
@@ -77,6 +92,7 @@ def configured_settings() -> Settings:
         azure_openai_llm_endpoint="https://llm.example.com/openai/v1/",
         azure_openai_llm_api_key="llm-key",
         azure_openai_llm_deployment="llm-deployment",
+        azure_openai_quality_filter_deployment="gpt-5.4-mini",
         azure_openai_image_endpoint="https://image.example.cognitiveservices.azure.com/",
         azure_openai_image_api_key="image-key",
         azure_openai_image_deployment="gpt-image-2-prod",
@@ -123,6 +139,35 @@ def test_generate_post_content_uses_article_text_without_source_framing(
     assert "realistic editorial image" not in schema_text
     assert "under " not in schema_text
     assert "concise" not in schema_text
+
+
+def test_evaluate_source_item_quality_uses_filter_deployment(monkeypatch) -> None:
+    FakeResponses.requests = []
+    monkeypatch.setattr("app.ai.AsyncOpenAI", FakeOpenAI)
+    source_item = SourceItem(
+        source="hacker_news",
+        source_item_id="123",
+        title="Original submission title",
+        url="https://example.com/article",
+        author="author",
+        score=42,
+        article_text="The article is a thin product announcement.",
+        raw_json={"id": 123},
+    )
+
+    client = AzureResponsesClient(configured_settings())
+    result = asyncio.run(client.evaluate_source_item_quality(source_item))
+
+    assert result.accepted is False
+    assert result.categories == ["advertisement"]
+    request = FakeResponses.requests[0]
+    request_input = json.loads(request["input"])
+    schema_text = json.dumps(QUALITY_FILTER_SCHEMA)
+
+    assert request["model"] == "gpt-5.4-mini"
+    assert request_input["article_text"] == source_item.article_text
+    assert "quality gate" in request["instructions"]
+    assert "unsupported_by_source" in schema_text
 
 
 def test_generate_image_calls_azure_image_rest_endpoint(monkeypatch) -> None:

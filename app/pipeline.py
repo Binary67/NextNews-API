@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.article import extract_html_snippet_text, fetch_article_text
 from app.agents import random_agent_name
-from app.ai import AzureResponsesClient, GeneratedPostContent
+from app.ai import AzureResponsesClient, GeneratedPostContent, SourceQualityEvaluation
 from app.config import Settings
 from app.hn import HN_SOURCE, fetch_best_story_ids, fetch_item, is_valid_story
 from app.models import GeneratedPost, SourceItem, utc_now
@@ -105,9 +105,41 @@ def create_failed_generated_post(
     return post
 
 
+def create_filtered_generated_post(
+    session: Session,
+    source_item: SourceItem,
+    error_message: str,
+) -> GeneratedPost | None:
+    post = GeneratedPost(
+        source_item_id=source_item.id,
+        status="filtered",
+        error_message=error_message,
+    )
+    session.add(post)
+
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return None
+
+    session.refresh(post)
+    return post
+
+
 def article_fetch_error_message(error: Exception) -> str:
     message = str(error).strip() or error.__class__.__name__
     return f"Article fetch failed: {message}"[:1000]
+
+
+def quality_filter_error_message(evaluation: SourceQualityEvaluation) -> str:
+    reason = evaluation.reason or "No reason provided"
+    categories = ", ".join(evaluation.categories)
+    if categories:
+        message = f"Quality filter rejected source item: {reason} Categories: {categories}"
+        return message[:1000]
+
+    return f"Quality filter rejected source item: {reason}"[:1000]
 
 
 def source_items_without_generated_post(session: Session, limit: int) -> list[SourceItem]:
@@ -268,6 +300,29 @@ async def generate_missing_posts(session: Session, settings: Settings) -> int:
                     if failed_post is None:
                         logger.info(
                             "Source item %s already has a generated post; skipping",
+                            source_item.id,
+                        )
+                    continue
+
+                logger.info(
+                    "Evaluating source item %s quality",
+                    source_item.id,
+                )
+                quality = await ai_client.evaluate_source_item_quality(source_item)
+                if not quality.accepted:
+                    filtered_post = create_filtered_generated_post(
+                        session,
+                        source_item,
+                        quality_filter_error_message(quality),
+                    )
+                    if filtered_post is None:
+                        logger.info(
+                            "Source item %s already has a generated post; skipping",
+                            source_item.id,
+                        )
+                    else:
+                        logger.info(
+                            "Filtered source item %s before post generation",
                             source_item.id,
                         )
                     continue

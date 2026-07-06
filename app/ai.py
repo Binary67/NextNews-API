@@ -19,6 +19,13 @@ class GeneratedPostContent:
     image_prompt: str
 
 
+@dataclass(frozen=True)
+class SourceQualityEvaluation:
+    accepted: bool
+    reason: str
+    categories: list[str]
+
+
 IMAGE_STYLES: tuple[str, ...] = (
     "Realistic editorial photograph with natural lighting, believable people or "
     "objects, and no text overlay.",
@@ -78,6 +85,39 @@ POST_SCHEMA = {
 }
 
 
+QUALITY_FILTER_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "accepted": {
+            "type": "boolean",
+            "description": "Whether the source item is worth turning into a NextNews post.",
+        },
+        "reason": {
+            "type": "string",
+            "description": "Brief explanation of the decision.",
+        },
+        "categories": {
+            "type": "array",
+            "description": "Rejection categories, or an empty array when accepted.",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "clickbait",
+                    "advertisement",
+                    "flamebait",
+                    "low_information",
+                    "unsupported_by_source",
+                    "off_topic",
+                    "duplicate_or_meta",
+                ],
+            },
+        },
+    },
+    "required": ["accepted", "reason", "categories"],
+}
+
+
 class AzureResponsesClient:
     def __init__(self, settings: Settings) -> None:
         if not settings.azure_configured:
@@ -87,6 +127,51 @@ class AzureResponsesClient:
         self._client = AsyncOpenAI(
             base_url=settings.azure_openai_llm_endpoint,
             api_key=settings.azure_openai_llm_api_key_value,
+        )
+
+    async def evaluate_source_item_quality(
+        self,
+        source_item: SourceItem,
+    ) -> SourceQualityEvaluation:
+        response = await self._client.responses.create(
+            model=self._settings.azure_openai_quality_filter_deployment,
+            instructions=(
+                "You are the quality gate for a technology news feed. Decide whether "
+                "a source item is worth turning into a post. Accept only substantive, "
+                "useful, factual items with enough source detail to support their main "
+                "claim. Reject clickbait, advertisements, promotional content, ragebait, "
+                "argument-bait, thin low-information content, off-topic content, mostly "
+                "meta discussion, and claims not supported by the provided source text. "
+                "Use only the provided source item; do not do external fact checking. "
+                "Return structured JSON only."
+            ),
+            input=json.dumps(
+                {
+                    "source": source_item.source,
+                    "source_item_id": source_item.source_item_id,
+                    "title": source_item.title,
+                    "url": source_item.url,
+                    "author": source_item.author,
+                    "score": source_item.score,
+                    "article_text": source_item.article_text,
+                    "raw": source_item.raw_json,
+                }
+            ),
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "nextnews_source_quality_filter",
+                    "schema": QUALITY_FILTER_SCHEMA,
+                    "strict": True,
+                }
+            },
+        )
+
+        payload = json.loads(response.output_text)
+        return SourceQualityEvaluation(
+            accepted=payload["accepted"],
+            reason=payload["reason"].strip(),
+            categories=list(payload["categories"]),
         )
 
     async def generate_post_content(self, source_item: SourceItem) -> GeneratedPostContent:
