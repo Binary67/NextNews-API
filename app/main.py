@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.ai import AzureResponsesClient, ThreadReply
 from app.config import Settings, get_settings
@@ -20,7 +20,6 @@ from app.models import (
     ConversationThread,
     GeneratedPost,
     PostLike,
-    SourceItem,
     utc_now,
 )
 from app.pipeline import run_pipeline_loop
@@ -256,7 +255,10 @@ def create_app(
     ) -> list[PostListItem]:
         statement = (
             select(GeneratedPost)
-            .join(SourceItem)
+            .options(
+                selectinload(GeneratedPost.source_item),
+                selectinload(GeneratedPost.like),
+            )
             .where(GeneratedPost.status == "ready")
             .order_by(GeneratedPost.ready_at.desc(), GeneratedPost.id.desc())
             .offset(offset)
