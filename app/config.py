@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     azure_openai_image_api_version: str = "2025-04-01-preview"
 
     hn_fetch_limit: int = Field(default=20, ge=1, le=500)
+    post_generation_limit: int = Field(default=1, ge=1, le=100)
     hn_pipeline_interval_seconds: int = Field(default=1800, ge=60)
 
     image_output_dir: str = "./data/images"

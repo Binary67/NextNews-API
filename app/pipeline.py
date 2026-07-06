@@ -126,7 +126,7 @@ async def generate_missing_posts(session: Session, settings: Settings) -> int:
     output_dir = Path(settings.image_output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for source_item in source_items_without_generated_post(session, settings.hn_fetch_limit):
+    for source_item in source_items_without_generated_post(session, settings.post_generation_limit):
         post = claim_generated_post(session, source_item, settings)
         if post is None:
             continue
@@ -181,4 +181,3 @@ async def run_pipeline_loop(
             logger.exception("Pipeline pass failed")
 
         await asyncio.sleep(settings.hn_pipeline_interval_seconds)
-
