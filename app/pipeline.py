@@ -103,15 +103,26 @@ def mark_post_failed(session: Session, post: GeneratedPost, error: Exception) ->
 async def ingest_hacker_news(session: Session, settings: Settings) -> int:
     inserted_count = 0
     async with httpx.AsyncClient(timeout=15.0) as client:
+        logger.info("Fetching up to %s Hacker News story ids", settings.hn_fetch_limit)
         story_ids = await fetch_best_story_ids(client, settings.hn_fetch_limit)
+        logger.info("Fetched %s Hacker News story ids", len(story_ids))
         for story_id in story_ids:
+            logger.info("Fetching Hacker News item %s", story_id)
             item = await fetch_item(client, story_id)
             if not is_valid_story(item):
+                logger.info("Skipping invalid Hacker News item %s", story_id)
                 continue
 
             inserted = insert_source_item(session, item)
             if inserted is not None:
                 inserted_count += 1
+                logger.info(
+                    "Inserted source item %s for Hacker News item %s",
+                    inserted.id,
+                    story_id,
+                )
+            else:
+                logger.info("Hacker News item %s already exists; skipping insert", story_id)
 
     return inserted_count
 
@@ -125,14 +136,27 @@ async def generate_missing_posts(session: Session, settings: Settings) -> int:
     generated_count = 0
     output_dir = Path(settings.image_output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    source_items = source_items_without_generated_post(session, settings.post_generation_limit)
+    logger.info(
+        "Found %s source items without generated posts (generation limit=%s)",
+        len(source_items),
+        settings.post_generation_limit,
+    )
 
-    for source_item in source_items_without_generated_post(session, settings.post_generation_limit):
+    for source_item in source_items:
         post = claim_generated_post(session, source_item, settings)
         if post is None:
+            logger.info("Source item %s is already claimed; skipping", source_item.id)
             continue
 
         try:
+            logger.info(
+                "Generating post content for post %s from source item %s",
+                post.id,
+                source_item.id,
+            )
             content = await ai_client.generate_post_content(source_item)
+            logger.info("Generating image for post %s", post.id)
             image_bytes = await ai_client.generate_image(content.image_prompt)
             image_path = output_dir / f"post-{post.id}.png"
             image_path.write_bytes(image_bytes)
@@ -146,6 +170,7 @@ async def generate_missing_posts(session: Session, settings: Settings) -> int:
                 str(image_path),
             )
             generated_count += 1
+            logger.info("Generated post %s successfully", post.id)
         except Exception as error:
             logger.exception("Failed to generate post for source item %s", source_item.id)
             mark_post_failed(session, post, error)
@@ -157,6 +182,7 @@ async def run_pipeline_once(
     session_factory: sessionmaker[Session],
     settings: Settings,
 ) -> None:
+    logger.info("Pipeline pass started")
     with session_factory() as session:
         inserted_count = await ingest_hacker_news(session, settings)
         generated_count = await generate_missing_posts(session, settings)
@@ -180,4 +206,8 @@ async def run_pipeline_loop(
         except Exception:
             logger.exception("Pipeline pass failed")
 
+        logger.info(
+            "Sleeping %s seconds before next pipeline pass",
+            settings.hn_pipeline_interval_seconds,
+        )
         await asyncio.sleep(settings.hn_pipeline_interval_seconds)

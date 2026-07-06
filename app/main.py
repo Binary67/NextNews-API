@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,16 @@ from app.database import create_app_engine, create_session_factory, init_databas
 from app.models import GeneratedPost, SourceItem
 from app.pipeline import run_pipeline_loop
 from app.schemas import HealthResponse, PostDetail, PostListItem
+
+
+def configure_app_logging() -> None:
+    app_logger = logging.getLogger("app")
+    app_logger.setLevel(logging.INFO)
+    if not app_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        app_logger.addHandler(handler)
+    app_logger.propagate = False
 
 
 def _image_url(image_path: str | None, settings: Settings) -> str | None:
@@ -44,6 +55,7 @@ def create_app(
     *,
     start_pipeline: bool = True,
 ) -> FastAPI:
+    configure_app_logging()
     app_settings = settings or get_settings()
     engine: Engine = create_app_engine(app_settings.database_url)
     session_factory: sessionmaker[Session] = create_session_factory(engine)
@@ -113,4 +125,3 @@ def create_app(
 
 
 app = create_app()
-
