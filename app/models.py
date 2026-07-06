@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.agents import DEFAULT_AGENT_NAME
@@ -14,6 +14,7 @@ def utc_now() -> datetime:
 class SourceItem(Base):
     __tablename__ = "source_items"
     __table_args__ = (
+        Index("ix_source_items_fetched_at_id", "fetched_at", "id"),
         UniqueConstraint("source", "source_item_id", name="uq_source_items_source_item_id"),
     )
 
@@ -41,6 +42,7 @@ class SourceItem(Base):
 class GeneratedPost(Base):
     __tablename__ = "generated_posts"
     __table_args__ = (
+        Index("ix_generated_posts_status_ready_at_id", "status", "ready_at", "id"),
         UniqueConstraint("source_item_id", name="uq_generated_posts_source_item_id"),
     )
 
@@ -88,6 +90,9 @@ class PostLike(Base):
 
 class ConversationThread(Base):
     __tablename__ = "conversation_threads"
+    __table_args__ = (
+        Index("ix_conversation_threads_post_id_updated_at_id", "post_id", "updated_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     post_id: Mapped[int] = mapped_column(ForeignKey("generated_posts.id"), index=True)
@@ -106,6 +111,14 @@ class ConversationThread(Base):
 
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
+    __table_args__ = (
+        Index(
+            "ix_conversation_messages_thread_id_created_at_id",
+            "thread_id",
+            "created_at",
+            "id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     thread_id: Mapped[int] = mapped_column(
