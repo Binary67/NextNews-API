@@ -48,6 +48,17 @@ def test_insert_source_item_dedupes_by_source_and_hn_id() -> None:
     assert len(session.scalars(select(SourceItem)).all()) == 1
 
 
+def test_source_items_without_generated_post_preserves_insert_order() -> None:
+    _, session = make_session()
+
+    assert insert_source_item(session, hn_item(1)) is not None
+    assert insert_source_item(session, hn_item(2)) is not None
+
+    source_items = source_items_without_generated_post(session, 10)
+
+    assert [item.source_item_id for item in source_items] == ["1", "2"]
+
+
 def test_ingest_hacker_news_skips_existing_ids_before_fetching_items(monkeypatch) -> None:
     settings = Settings(
         database_url="sqlite://",

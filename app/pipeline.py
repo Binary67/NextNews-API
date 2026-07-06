@@ -115,7 +115,7 @@ def source_items_without_generated_post(session: Session, limit: int) -> list[So
         select(SourceItem)
         .outerjoin(GeneratedPost, GeneratedPost.source_item_id == SourceItem.id)
         .where(GeneratedPost.id.is_(None))
-        .order_by(SourceItem.fetched_at.desc(), SourceItem.id.desc())
+        .order_by(SourceItem.fetched_at.asc(), SourceItem.id.asc())
         .limit(limit)
     )
     return list(session.scalars(statement))
